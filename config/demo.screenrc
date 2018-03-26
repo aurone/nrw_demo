@@ -18,5 +18,8 @@ stuff "roslaunch pr2_teleop teleop_keyboard.launch"
 screen -t move
 stuff "roslaunch pr2_moveit_config move_group.launch"
 
+screen -t demo
+stuff "rosrun nrw_demo demo_executive"
+
 screen -t bash
 screen -t bash
