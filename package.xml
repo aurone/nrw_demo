@@ -9,12 +9,15 @@
 
     <buildtool_depend>catkin</buildtool_depend>
 
+    <depend>actionlib</depend>
+    <depend>pr2_controllers_msgs</depend>
+    <depend>moveit_ros_planning_interface</depend>
+    <depend>roscpp</depend>
+
     <exec_depend>roslaunch</exec_depend>
     <exec_depend>rviz</exec_depend>
     <exec_depend>gazebo_ros</exec_depend>
     <exec_depend>pr2_gazebo</exec_depend>
     <exec_depend>pr2_teleop</exec_depend>
     <exec_depend>pr2_moveit_config</exec_depend>
-
-    <depend>roscpp</depend>
 </package>
