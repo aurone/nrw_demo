@@ -12,7 +12,9 @@ find_package(
         actionlib
         pr2_controllers_msgs
         roscpp
-        moveit_ros_planning_interface)
+        moveit_ros_planning_interface
+        ar_track_alvar_msgs
+        tf)
 
 catkin_package()
 
@@ -23,6 +25,7 @@ include_directories(${catkin_INCLUDE_DIRS})
 add_executable(demo_executive src/demo_executive.cpp)
 target_link_libraries(
     demo_executive
+    ${tf_LIBRARIES}
     ${actionlib_LIBRARIES}
     ${moveit_ros_planning_interface_LIBRARIES}
     ${roscpp_LIBRARIES})

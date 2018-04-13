@@ -1,14 +1,45 @@
 #include <assert.h>
 #include <memory>
+#include <unordered_map>
+
+#include <ar_track_alvar_msgs/AlvarMarker.h>
+#include <ar_track_alvar_msgs/AlvarMarkers.h>
 
 #include <actionlib/client/simple_action_client.h>
 #include <moveit/move_group_interface/move_group.h>
 #include <pr2_controllers_msgs/Pr2GripperCommandAction.h>
 #include <ros/ros.h>
 
+#include <tf/transform_broadcaster.h>
+#include <tf/transform_listener.h>
+
 using moveit::planning_interface::MoveGroup;
 
 using GripperCommandActionClient = actionlib::SimpleActionClient<pr2_controllers_msgs::Pr2GripperCommandAction>;
+
+std::unordered_map<int, geometry_msgs::PoseStamped> g_id_to_pose;
+ar_track_alvar_msgs::AlvarMarkers g_markers;
+geometry_msgs::PoseStamped g_grasp_pose;
+
+void fillGraspPoses()
+{
+    // hardcoded grasp poses defined in marker frames
+    geometry_msgs::PoseStamped p;
+    p.header.frame_id = "ar_marker_6";
+    p.pose.orientation.x = 0.0;
+    p.pose.orientation.y = 0.0;
+    p.pose.orientation.z = 0.0;
+    p.pose.orientation.w = 1.0;
+    p.pose.position.x = 0.0;
+    p.pose.position.y = 0.0;
+    p.pose.position.z = 0.0;
+    g_id_to_pose.insert(std::pair<int, geometry_msgs::PoseStamped> (6, p));
+}
+
+void ARPoseCallback(const ar_track_alvar_msgs::AlvarMarkers& msg)
+{
+    g_markers = msg;
+}
 
 enum struct State
 {
@@ -93,6 +124,25 @@ State DoPrepareGripper()
 
 State DoFindObject()
 {
+    tf::TransformListener listener;
+
+    // assuming we see only one object at a time
+    auto marker = g_markers.markers[0];
+    int id = marker.id;
+    auto pose = marker.pose;
+    std::string marker_frame = "ar_marker_" + std::to_string(id);
+
+    auto it = g_id_to_pose.find(id);
+    if (it == g_id_to_pose.end()) {
+        ROS_ERROR("Could not find object in the library");
+        return State::FindObject;
+    }
+
+    auto g_tf = it->second;
+    listener.waitForTransform("base_link", marker_frame,
+                              ros::Time(0), ros::Duration(10.0));
+    listener.transformPose(marker_frame, g_tf, g_grasp_pose);
+
     return State::ExecutePickup;
 }
 
@@ -100,15 +150,15 @@ State DoMoveToGrasp()
 {
     ROS_INFO("Move link '%s' to grasp pose", g_move_group->getEndEffectorLink().c_str());
 #if 1
-    geometry_msgs::Pose tip_pose;
-    tip_pose.orientation.x = 0.726;
-    tip_pose.orientation.y = 0.687;
-    tip_pose.orientation.z = 0.015;
-    tip_pose.orientation.w = 0.018;
-    tip_pose.position.x = 0.502;
-    tip_pose.position.y = -0.403;
-    tip_pose.position.z = 1.007;
-    g_move_group->setPoseTarget(tip_pose);
+    // geometry_msgs::Pose tip_pose;
+    // tip_pose.orientation.x = 0.726;
+    // tip_pose.orientation.y = 0.687;
+    // tip_pose.orientation.z = 0.015;
+    // tip_pose.orientation.w = 0.018;
+    // tip_pose.position.x = 0.502;
+    // tip_pose.position.y = -0.403;
+    // tip_pose.position.z = 1.007;
+    g_move_group->setPoseTarget(g_grasp_pose.pose);
     auto err = g_move_group->move();
     if (err.val != moveit_msgs::MoveItErrorCodes::SUCCESS) {
         ROS_ERROR("Failed to move arm to grasp pose");
@@ -187,6 +237,9 @@ int main(int argc, char* argv[])
 
     ros::AsyncSpinner spinner(2);
     spinner.start();
+
+    ros::Subscriber pose_sub = nh.subscribe("ar_pose_marker", 1000, ARPoseCallback);
+    fillGraspPoses();
 
     ROS_INFO("Create Move Group");
 //    MoveGroup::Options ops(g_planning_group);
