@@ -14,6 +14,7 @@
     <depend>moveit_ros_planning_interface</depend>
     <depend>roscpp</depend>
     <depend>ar_track_alvar_msgs</depend>
+    <depend>eigen_conversions</depend>
 
     <exec_depend>roslaunch</exec_depend>
     <exec_depend>rviz</exec_depend>

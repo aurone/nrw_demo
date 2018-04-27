@@ -1,0 +1,26 @@
+source screenrc
+
+screen -t marker
+stuff "roslaunch ar_tag_toolbox ar_track_kinect.launch marker_size:=5"
+
+screen -t rviz
+stuff "rosrun rviz rviz"
+
+screen -t pose
+stuff "rosrun tf static_transform_publisher 0 0 0 0 0 0 map odom_combined 13"
+
+screen -t ctrl
+stuff "roslaunch groovy_indigo_moveit_wrapper i2g_pr2_follow_trajectory_wrappers.launch"
+
+screen -t plan
+stuff "roslaunch pr2_sbpl_interface_config move_group.launch"
+
+screen -t demo
+stuff "rosrun nrw_demo demo_executive"
+
+# (robot)
+roslaunch rgbd_assembler openni_new_node.launch
+
+# (robot) point head at marker
+rosrun simple_head point_head
+
