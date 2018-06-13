@@ -34,5 +34,9 @@ target_link_libraries(
     ${moveit_ros_planning_interface_LIBRARIES}
     ${roscpp_LIBRARIES})
 
+add_executable(conveyor_simulator src/conveyor_simulator.cpp)
+target_link_libraries(conveyor_simulator ${roscpp_LIBRARIES})
+target_link_libraries(conveyor_simulator ${tf_LIBRARIES})
+
 install(TARGETS demo_executive RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION})
 
