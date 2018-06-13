@@ -21,6 +21,9 @@ stuff "rosrun tf static_transform_publisher 0 0 0 0 0 0 map odom_combined 13"
 screen -t move
 stuff "roslaunch pr2_sbpl_interface_config move_group.launch"
 
+screen -t conveyor
+stuff "rosrun nrw_demo conveyor_simulator"
+
 screen -t demo
 stuff "rosrun nrw_demo demo_executive"
 
