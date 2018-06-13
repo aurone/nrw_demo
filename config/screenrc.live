@@ -19,8 +19,8 @@ screen -t demo
 stuff "rosrun nrw_demo demo_executive"
 
 # (robot)
-roslaunch rgbd_assembler openni_new_node.launch
+#roslaunch rgbd_assembler openni_new_node.launch
 
 # (robot) point head at marker
-rosrun simple_head point_head
+#rosrun simple_head point_head
 
