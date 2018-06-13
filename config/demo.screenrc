@@ -15,8 +15,11 @@ stuff "roslaunch pr2_gazebo pr2.launch"
 screen -t teleop
 stuff "roslaunch pr2_teleop teleop_keyboard.launch"
 
+screen -t pose
+stuff "rosrun tf static_transform_publisher 0 0 0 0 0 0 map odom_combined 13"
+
 screen -t move
-stuff "roslaunch pr2_moveit_config move_group.launch"
+stuff "roslaunch pr2_sbpl_interface_config move_group.launch"
 
 screen -t demo
 stuff "rosrun nrw_demo demo_executive"
