@@ -632,6 +632,7 @@ PickState DoExecutePickup(PickMachine* mach)
     auto err = mach->move_group->move();
     if (err.val != moveit_msgs::MoveItErrorCodes::SUCCESS) {
         ROS_ERROR("Failed to move arm to grasp pose");
+        return PickState::WaitForGoal;
     }
 #endif
     return PickState::GraspObject;
