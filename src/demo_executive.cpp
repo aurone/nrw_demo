@@ -70,7 +70,7 @@ struct PickMachine
     PickMachState* states;
 
     std::unique_ptr<MoveGroup> move_group;
-    std::unique_ptr<GripperCommandActionClient> gripper_client;
+    std::unique_ptr<GripperCommandActionClient> gripper_command_client;
     std::unique_ptr<FollowJointTrajectoryActionClient> follow_joint_trajectory_client;
 
     std::atomic<bool> goal_ready;
@@ -466,7 +466,7 @@ bool OpenGripper(GripperCommandActionClient* client)
 PickState DoPrepareGripper(PickMachine* mach)
 {
     // open the gripper
-    OpenGripper(mach->gripper_client.get());
+    OpenGripper(mach->gripper_command_client.get());
     return PickState::WaitForGoal;
 }
 
@@ -731,13 +731,13 @@ PickState DoCloseGripper(PickMachine* mach)
     pr2_controllers_msgs::Pr2GripperCommandGoal goal;
     goal.command.position = 0.0;
     goal.command.max_effort = 50.0; // gently
-    auto state = mach->gripper_client->sendGoalAndWait(goal);
+    auto state = mach->gripper_command_client->sendGoalAndWait(goal);
     if (state != actionlib::SimpleClientGoalState::SUCCEEDED) {
         ROS_ERROR("Failed to close gripper (%s)", state.getText().c_str());
     }
 
     ROS_INFO("Result:");
-    auto res = mach->gripper_client->getResult();
+    auto res = mach->gripper_command_client->getResult();
     if (res) {
         ROS_INFO("  Effort: %f", res->effort);
         ROS_INFO("  Position %f", res->position);
@@ -772,7 +772,7 @@ PickState DoExecuteDropoff(PickMachine* mach)
 
 PickState DoOpenGripper(PickMachine* mach)
 {
-    OpenGripper(mach->gripper_client.get());
+    OpenGripper(mach->gripper_command_client.get());
     return PickState::WaitForGoal;
 }
 
@@ -912,10 +912,10 @@ int main(int argc, char* argv[])
         86.99, 20.40, 73.15, -110.59, 141.89, -28.94, 0.0
     };
 
-    ROS_INFO("Create Left Gripper Action Client");
-    left_machine.gripper_client.reset(new GripperCommandActionClient(
+    ROS_INFO("Create Left Gripper Command Action Client");
+    left_machine.gripper_command_client.reset(new GripperCommandActionClient(
                 "l_gripper_controller/gripper_action"));
-    if (!left_machine.gripper_client->waitForServer(ros::Duration(10.0))) {
+    if (!left_machine.gripper_command_client->waitForServer(ros::Duration(10.0))) {
         ROS_ERROR("Gripper Action client not available");
         return 1;
     }
@@ -937,7 +937,7 @@ int main(int argc, char* argv[])
     right_machine.goal_ready = false;
     right_machine.move_group.reset(new MoveGroup(
                 "right_arm", boost::shared_ptr<tf::Transformer>(), ros::WallDuration(25.0)));
-    right_machine.gripper_client.reset(new GripperCommandActionClient(
+    right_machine.gripper_command_client.reset(new GripperCommandActionClient(
                 "r_gripper_controller/gripper_action"));
     right_machine.move_group->setPlanningTime(10.0);
     right_machine.move_group->setPlannerId("right_arm[arastar_bfs_manip]");
@@ -948,10 +948,10 @@ int main(int argc, char* argv[])
         -79.38, 15.53, -68.79, -95.13, 359.0, -66.94, 79.95
     };
 
-    ROS_INFO("Create Right Gripper Action Client");
-    right_machine.gripper_client.reset(new GripperCommandActionClient(
+    ROS_INFO("Create Right Gripper Command Action Client");
+    right_machine.gripper_command_client.reset(new GripperCommandActionClient(
                 "r_gripper_controller/gripper_action"));
-    if (!right_machine.gripper_client->waitForServer(ros::Duration(10.0))) {
+    if (!right_machine.gripper_command_client->waitForServer(ros::Duration(10.0))) {
         ROS_ERROR("Gripper Action Client not available");
         return 1;
     }
