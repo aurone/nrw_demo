@@ -31,6 +31,18 @@ using FollowJointTrajectoryActionClient = actionlib::SimpleActionClient<
 using GripperCommandActionClient = actionlib::SimpleActionClient<
         pr2_controllers_msgs::Pr2GripperCommandAction>;
 
+// PrepareGripper -> WaitForGoal
+// WaitForGoal -> Finished
+// WaitForGoal -> ExecutePickup
+// ExecutePickup -> GraspObject
+// ExecutePickup -> WaitForGoal (failure case)
+// GraspObject -> CloseGripper
+// CloserGripper -> PlanDropoff
+// PlanDropoff -> (TODO: failure case...what do we do if we can't move back?)
+// PlanDropoff -> ExecuteDropoff
+// ExecuteDropoff -> WaitForGoal
+// ExecuteDropoff -> (TODO: failure case...what do we do if we can't move back?)
+
 enum struct PickState
 {
     Finished = -1,
