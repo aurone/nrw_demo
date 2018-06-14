@@ -335,7 +335,7 @@ void ARPoseCallback(const ar_track_alvar_msgs::AlvarMarkers& msg)
 void GetFreshMarker(ar_track_alvar_msgs::AlvarMarker& m)
 {
     g_marker_mutex.lock();
-    while (!g_markers.markers.size() > 0) {
+    while (!g_markers.markers.empty()) {
         if (!ros::ok()) {
             break;
         }
