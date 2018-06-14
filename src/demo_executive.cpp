@@ -93,6 +93,8 @@ struct PickMachine
 
     std::vector<double> home_position;
 
+    MoveGroup::Plan dropoff_plan;
+
     geometry_msgs::PoseStamped grasp_pose_goal_base_footprint;
     geometry_msgs::PoseStamped grasp_pose_goal;
 };
@@ -762,11 +764,6 @@ PickState DoCloseGripper(PickMachine* mach)
 
 PickState DoPlanDropoff(PickMachine* mach)
 {
-    return PickState::ExecuteDropoff;
-}
-
-PickState DoExecuteDropoff(PickMachine* mach)
-{
     auto v = mach->home_position;
     for (auto& value : v) {
         value *= M_PI / 180.0;
@@ -774,9 +771,35 @@ PickState DoExecuteDropoff(PickMachine* mach)
 
     mach->move_group->setJointValueTarget(v);
 
-    auto err = mach->move_group->move();
-    if (err.val != moveit_msgs::MoveItErrorCodes::SUCCESS) {
-        ROS_ERROR("Failed to move arm to grasp pose");
+    auto err = mach->move_group->plan(mach->dropoff_plan);
+    if (err != moveit_msgs::MoveItErrorCodes::SUCCESS) {
+        // You got us in here, did you have a plan for getting out?
+        // we should literally execute the pickup plan in reverse ...probably...
+        ROS_ERROR("PRETTY BAD! GOING NOWHERE!");
+    }
+
+    return PickState::ExecuteDropoff;
+}
+
+PickState DoExecuteDropoff(PickMachine* mach)
+{
+//    auto v = mach->home_position;
+//    for (auto& value : v) {
+//        value *= M_PI / 180.0;
+//    }
+//
+//    mach->move_group->setJointValueTarget(v);
+//
+//    auto err = mach->move_group->move();
+//    if (err.val != moveit_msgs::MoveItErrorCodes::SUCCESS) {
+//        ROS_ERROR("Failed to move arm to grasp pose");
+//    }
+
+    control_msgs::FollowJointTrajectoryGoal goal;
+    goal.trajectory = mach->dropoff_plan.trajectory_.joint_trajectory;
+    auto state = mach->follow_joint_trajectory_client->sendGoalAndWait(goal);
+    if (state != actionlib::SimpleClientGoalState::SUCCEEDED) {
+        ROS_ERROR("ALSO PRETTY BAD!");
     }
 
     return PickState::OpenGripper;
