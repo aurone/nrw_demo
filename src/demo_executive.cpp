@@ -468,9 +468,6 @@ bool SendGoal(PickMachine* mach, const geometry_msgs::PoseStamped& grasp_pose_go
     return true;
 }
 
-// TODO:
-// select an object which is untargeted by another machine, we have a good
-// estimate of its position and velocity, and we're able to grasp it
 bool TryPickObject(PickMachine* mach, bool left)
 {
     ROS_INFO("Try to pick object");
@@ -797,6 +794,18 @@ void RunStateMachine(PickMachine* mach)
     }
 }
 
+// 0. TODO
+//
+// ...move both arms simultaneously
+// ...single-shot conveyor velocity estimation
+// ...better policy for choosing which object to grasp
+// .....quick kinematics checks
+// .....quick planning queries
+// .....choose best of available objects
+// ...planning with time to choose earliest time
+//
+// 1. new
+//
 // pose = localize_conveyor()
 // open_grippers()
 //
@@ -807,7 +816,9 @@ void RunStateMachine(PickMachine* mach)
 //   // * is the object being attempted by the other arm?
 //   // * is the other arm in the way
 //   select untargeted object
-
+//
+// 2. old
+//
 // pose = localize_conveyor()
 // open_gripper()
 // loop:
