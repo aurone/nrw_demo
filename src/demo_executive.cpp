@@ -1050,9 +1050,9 @@ int main(int argc, char* argv[])
 
         if (idle_machine != NULL &&
             (
-                other_machine->curr_state == PickState::WaitForGoal //||
-//                other_machine->curr_state == PickState::ExecuteDropoff ||
-//                other_machine->curr_state == PickState::OpenGripper
+                other_machine->curr_state == PickState::WaitForGoal ||
+                other_machine->curr_state == PickState::ExecuteDropoff ||
+                other_machine->curr_state == PickState::OpenGripper
             ))
         {
             // select a target object
