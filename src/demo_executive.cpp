@@ -9,6 +9,7 @@
 
 #include <Eigen/Dense>
 
+#include <control_msgs/FollowJointTrajectoryAction.h>
 #include <ar_track_alvar_msgs/AlvarMarker.h>
 #include <ar_track_alvar_msgs/AlvarMarkers.h>
 #include <eigen_conversions/eigen_msg.h>
@@ -23,6 +24,9 @@
 #include <tf/transform_listener.h>
 
 using moveit::planning_interface::MoveGroup;
+
+using FollowJointTrajectoryActionClient = actionlib::SimpleActionClient<
+        control_msgs::FollowJointTrajectoryAction>;
 
 using GripperCommandActionClient = actionlib::SimpleActionClient<
         pr2_controllers_msgs::Pr2GripperCommandAction>;
@@ -67,6 +71,7 @@ struct PickMachine
 
     std::unique_ptr<MoveGroup> move_group;
     std::unique_ptr<GripperCommandActionClient> gripper_client;
+    std::unique_ptr<FollowJointTrajectoryActionClient> follow_joint_trajectory_client;
 
     std::atomic<bool> goal_ready;
 
@@ -382,10 +387,22 @@ bool ResetArms(PickMachine* l_mach, PickMachine* r_mach)
 
         l_mach->move_group->setJointValueTarget(v);
 
-        auto err = l_mach->move_group->move();
-        if (err.val != moveit_msgs::MoveItErrorCodes::SUCCESS) {
-            ROS_ERROR("Failed to move arm to grasp pose");
-            return false;
+        {
+            moveit::planning_interface::MoveGroup::Plan plan;
+            auto err = l_mach->move_group->plan(plan);
+            if (err.val != moveit_msgs::MoveItErrorCodes::SUCCESS) {
+                ROS_WARN("Failed to plan to home position");
+                return false;
+            }
+
+            control_msgs::FollowJointTrajectoryGoal goal;
+            goal.trajectory = plan.trajectory_.joint_trajectory;
+
+            auto state = l_mach->follow_joint_trajectory_client->sendGoalAndWait(goal);
+            if (state != actionlib::SimpleClientGoalState::SUCCEEDED) {
+                ROS_ERROR("Failed to execute trajectory to home position");
+                return false;
+            }
         }
     }
 
@@ -397,10 +414,22 @@ bool ResetArms(PickMachine* l_mach, PickMachine* r_mach)
 
         r_mach->move_group->setJointValueTarget(v);
 
-        auto err = r_mach->move_group->move();
-        if (err.val != moveit_msgs::MoveItErrorCodes::SUCCESS) {
-            ROS_ERROR("Failed to move arm to grasp pose");
-            return false;
+        {
+            moveit::planning_interface::MoveGroup::Plan plan;
+            auto err = r_mach->move_group->plan(plan);
+            if (err.val != moveit_msgs::MoveItErrorCodes::SUCCESS) {
+                ROS_WARN("Failed to plan to home position");
+                return false;
+            }
+
+            control_msgs::FollowJointTrajectoryGoal goal;
+            goal.trajectory = plan.trajectory_.joint_trajectory;
+
+            auto state = r_mach->follow_joint_trajectory_client->sendGoalAndWait(goal);
+            if (state != actionlib::SimpleClientGoalState::SUCCEEDED) {
+                ROS_ERROR("Failed to move to execute trajectory to home position");
+                return false;
+            }
         }
     }
 
@@ -890,6 +919,14 @@ int main(int argc, char* argv[])
         ROS_ERROR("Gripper Action client not available");
         return 1;
     }
+
+    ROS_INFO("Create Left Arm Follow Joint Trajectory Action Client");
+    left_machine.follow_joint_trajectory_client.reset(new FollowJointTrajectoryActionClient(
+                "l_arm_controller/follow_joint_trajectory"));
+    if (!left_machine.follow_joint_trajectory_client->waitForServer(ros::Duration(10.0))) {
+        ROS_ERROR("Follow Joint Trajectory client not available");
+        return 1;
+    }
     left_machine.states = states;
 
     ROS_INFO("Initialize right picking machine");
@@ -916,6 +953,14 @@ int main(int argc, char* argv[])
                 "r_gripper_controller/gripper_action"));
     if (!right_machine.gripper_client->waitForServer(ros::Duration(10.0))) {
         ROS_ERROR("Gripper Action Client not available");
+        return 1;
+    }
+
+    ROS_INFO("Create Right Arm Follow Joint Trajectory Action Client");
+    right_machine.follow_joint_trajectory_client.reset(new FollowJointTrajectoryActionClient(
+                "r_arm_controller/follow_joint_trajectory"));
+    if (!right_machine.follow_joint_trajectory_client->waitForServer(ros::Duration(10.0))) {
+        ROS_ERROR("Follow Joint Trajectory client not available");
         return 1;
     }
     right_machine.states = states;
