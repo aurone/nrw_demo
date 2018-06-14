@@ -1018,6 +1018,8 @@ int main(int argc, char* argv[])
         PickMachine* other_machine = NULL;
 
         ROS_WARN("picks = %d", picks);
+#define FORCE_ALTERNATE 1
+#if FORCE_ALTERNATE
         if ((picks & 1) == 0) {
             if (right_machine.curr_state == PickState::WaitForGoal) {
                 idle_machine = &right_machine;
@@ -1035,14 +1037,15 @@ int main(int argc, char* argv[])
                 other_machine = &left_machine;
             }
         }
-
-//        if (right_machine.curr_state == PickState::WaitForGoal) {
-//            idle_machine = &right_machine;
-//            other_machine = &left_machine;
-//        } else if (left_machine.curr_state == PickState::WaitForGoal) {
-//            idle_machine = &left_machine;
-//            other_machine = &right_machine;
-//        }
+#else
+        if (right_machine.curr_state == PickState::WaitForGoal) {
+            idle_machine = &right_machine;
+            other_machine = &left_machine;
+        } else if (left_machine.curr_state == PickState::WaitForGoal) {
+            idle_machine = &left_machine;
+            other_machine = &right_machine;
+        }
+#endif
 
         if (idle_machine != NULL &&
             (
