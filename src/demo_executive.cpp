@@ -35,6 +35,10 @@ enum struct PickState
     ExecutePickup,
     GraspObject,
     CloseGripper,
+    // distinguish between planning and execution for dropoff so that we can
+    // plan for an idle arm while the busy arm is moving (moveit only lets us
+    // plan for one group at a time)
+    PlanDropoff,
     ExecuteDropoff,
     OpenGripper,
     Count
@@ -355,6 +359,7 @@ auto to_cstring(PickState state) -> const char*
     case PickState::ExecutePickup:      return "ExecutePickup";
     case PickState::GraspObject:        return "GraspObject";
     case PickState::CloseGripper:       return "CloseGripper";
+    case PickState::PlanDropoff:        return "PlanDropoff";
     case PickState::ExecuteDropoff:     return "ExecuteDropoff";
     case PickState::OpenGripper:        return "OpenGripper";
     default:                            return "<Unknown>";
@@ -711,6 +716,11 @@ PickState DoCloseGripper(PickMachine* mach)
         ROS_INFO("  Stalled: %d", res->stalled);
     }
 
+    return PickState::PlanDropoff;
+}
+
+PickState DoPlanDropoff(PickMachine* mach)
+{
     return PickState::ExecuteDropoff;
 }
 
@@ -853,6 +863,7 @@ int main(int argc, char* argv[])
     states[(int)PickState::ExecutePickup].pump = DoMoveToGrasp;
     states[(int)PickState::GraspObject].pump = DoGraspObject;
     states[(int)PickState::CloseGripper].pump = DoCloseGripper;
+    states[(int)PickState::PlanDropoff].pump = DoPlanDropoff;
     states[(int)PickState::ExecuteDropoff].pump = DoExecuteDropoff;
     states[(int)PickState::OpenGripper].pump = DoOpenGripper;
 
