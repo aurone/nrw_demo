@@ -616,7 +616,7 @@ bool TryPickObject(PickMachine* mach, bool left)
     return SendGoal(mach, grasp_pose_goal_local, conveyor_speed);
 }
 
-PickState DoMoveToGrasp(PickMachine* mach)
+PickState DoExecutePickup(PickMachine* mach)
 {
     ROS_INFO("Move link '%s' to grasp pose", mach->move_group->getEndEffectorLink().c_str());
 #if 1
@@ -924,7 +924,7 @@ int main(int argc, char* argv[])
     PickMachState states[(int)PickState::Count];
     states[(int)PickState::PrepareGripper].pump = DoPrepareGripper;
     states[(int)PickState::WaitForGoal].pump = DoWaitForGoal;
-    states[(int)PickState::ExecutePickup].pump = DoMoveToGrasp;
+    states[(int)PickState::ExecutePickup].pump = DoExecutePickup;
     states[(int)PickState::GraspObject].pump = DoGraspObject;
     states[(int)PickState::CloseGripper].pump = DoCloseGripper;
     states[(int)PickState::PlanDropoff].pump = DoPlanDropoff;
