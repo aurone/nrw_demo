@@ -70,6 +70,8 @@ struct PickMachine
 
     double conveyor_speed;
 
+    std::vector<double> home_position;
+
     geometry_msgs::PoseStamped grasp_pose_goal_base_footprint;
     geometry_msgs::PoseStamped grasp_pose_goal;
 };
@@ -365,6 +367,41 @@ void DoLocalizeConveyor()
     // ...position would be nice too but I won't cry about it
 }
 
+bool ResetArms(PickMachine* l_mach, PickMachine* r_mach)
+{
+    {
+        auto v = l_mach->home_position;
+        for (auto& value : v) {
+            value *= M_PI / 180.0;
+        }
+
+        l_mach->move_group->setJointValueTarget(v);
+
+        auto err = l_mach->move_group->move();
+        if (err.val != moveit_msgs::MoveItErrorCodes::SUCCESS) {
+            ROS_ERROR("Failed to move arm to grasp pose");
+            return false;
+        }
+    }
+
+    {
+        auto v = r_mach->home_position;
+        for (auto& value : v) {
+            value *= M_PI / 180.0;
+        }
+
+        r_mach->move_group->setJointValueTarget(v);
+
+        auto err = r_mach->move_group->move();
+        if (err.val != moveit_msgs::MoveItErrorCodes::SUCCESS) {
+            ROS_ERROR("Failed to move arm to grasp pose");
+            return false;
+        }
+    }
+
+    return true;
+}
+
 bool OpenGripper(GripperCommandActionClient* client)
 {
     // open the gripper
@@ -403,6 +440,7 @@ PickState DoWaitForGoal(PickMachine* mach)
 {
     while (ros::ok()) {
         if (mach->goal_ready) {
+            mach->goal_ready = false; // consume goal
             return PickState::ExecutePickup;
         }
         ros::Duration(1.0).sleep();
@@ -427,6 +465,7 @@ bool SendGoal(PickMachine* mach, const geometry_msgs::PoseStamped& grasp_pose_go
     mach->conveyor_speed = conveyor_speed;
 
     mach->goal_ready = true;
+    return true;
 }
 
 // TODO:
@@ -444,7 +483,10 @@ bool TryPickObject(PickMachine* mach, bool left)
     // select an object
     for (auto& object : g_world_state.objects) {
         // skip claimed objects
-        if (object.claimed) continue;
+        if (object.claimed) {
+            ROS_INFO(" -> Skip claimed object '%u'", object.id);
+            continue;
+        }
 
         geometry_msgs::Vector3Stamped vel;
         // have a good velocity estimate
@@ -461,7 +503,10 @@ bool TryPickObject(PickMachine* mach, bool left)
     }
     UnlockWorldState(&g_world_state);
 
-    if (!found) return false; // no object with a reasonable estimate
+    if (!found) {
+        ROS_INFO("  No reasonable estimates of object velocity");
+        return false; // no object with a reasonable estimate
+    }
 
     // OLD FUNCTIONALITY: get 6 samples, evenly spaced every 0.2 seconds and
     // compute the average velocity at any point in the path
@@ -477,6 +522,9 @@ bool TryPickObject(PickMachine* mach, bool left)
     // Construct gripper goal //
     ////////////////////////////
 
+    ROS_INFO("Construct gripper goal");
+    ROS_INFO("  Object position = (%f, %f, %f)", object_pose.pose.position.x, object_pose.pose.position.y, object_pose.pose.position.z);
+
     // how far the object will have moved during the time it takes to close the
     // gripper
     auto g_grasp_offset = g_time_to_reach_grasp * conveyor_speed;
@@ -491,7 +539,7 @@ bool TryPickObject(PickMachine* mach, bool left)
 
     // final pose of object after speed estimation + distance object will travel
     // during arm execution
-    grasp_pose_goal_local.pose.position.y = object_pose.pose.position.y - g_grasp_offset;
+    grasp_pose_goal_local.pose.position.y = object_pose.pose.position.y + g_grasp_offset;
 
     // hardcoded :)
     grasp_pose_goal_local.pose.position.z = 0.73; //+= 0.05;
@@ -502,16 +550,23 @@ bool TryPickObject(PickMachine* mach, bool left)
     if (!left) {
         grasp_pose_goal_local.pose.position.y = std::min(grasp_pose_goal_local.pose.position.y, -0.05);
     } else {
-        grasp_pose_goal_local.pose.position.y = std::min(grasp_pose_goal_local.pose.position.y, 0.35);
+        grasp_pose_goal_local.pose.position.y = std::min(grasp_pose_goal_local.pose.position.y, 0.40);
     }
 
-    // should care about the gripping time
+    // check if the object will be unreachable by the time we get there
     ROS_INFO("Picking at y: %f ", grasp_pose_goal_local.pose.position.y);
-    if (grasp_pose_goal_local.pose.position.y < -0.4) {
-        ROS_INFO("Sorry! that was too fast");
-        return false;
+    if (!left) {
+        if (grasp_pose_goal_local.pose.position.y < -0.4) {
+            // TODO: add this to criteria for selecting object
+            ROS_INFO(" -> Sorry! that was too fast");
+            return false;
+        }
+    } else {
+        if (grasp_pose_goal_local.pose.position.y < 0.05) {
+            ROS_INFO(" -> Sorry! that was too fast");
+            return false;
+        }
     }
-    // grasp_pose_goal_local.pose.position.y = std::max(grasp_pose_goal_local.pose.position.y, -0.35);
 
     return SendGoal(mach, grasp_pose_goal_local, conveyor_speed);
 }
@@ -664,10 +719,7 @@ PickState DoCloseGripper(PickMachine* mach)
 
 PickState DoExecuteDropoff(PickMachine* mach)
 {
-    auto v = std::vector<double>({
-            //-94.13, 19.62, -68.78, -102.20, 359.0, -114.55, 359.00
-            -79.38, 15.53, -68.79, -95.13, 359.0, -66.94, 79.95
-    });
+    auto v = mach->home_position;
     for (auto& value : v) {
         value *= M_PI / 180.0;
     }
@@ -794,20 +846,20 @@ int main(int argc, char* argv[])
     states[(int)PickState::OpenGripper].pump = DoOpenGripper;
 
     ROS_INFO("Initialize left picking machine");
-    MoveGroup::Options ops("left_arm", "robot_description", ros::NodeHandle("left_arm"));
-//    ops.group_name = "left_arm";
-//    ops.node_handle_ = ros::NodeHandle("left_arm");
     PickMachine left_machine;
     left_machine.prev_state = PickState::PrepareGripper;
     left_machine.curr_state = PickState::PrepareGripper;
     left_machine.next_state = PickState::PrepareGripper;
     left_machine.goal_ready = false;
     left_machine.move_group.reset(new MoveGroup(
-                ops, boost::shared_ptr<tf::Transformer>(), ros::WallDuration(25.0)));
+                "left_arm", boost::shared_ptr<tf::Transformer>(), ros::WallDuration(25.0)));
     left_machine.move_group->setPlanningTime(10.0);
     left_machine.move_group->setPlannerId("left_arm[arastar_bfs_manip]");
     left_machine.move_group->setWorkspace(-0.4, -1.2, 0.0, 1.10, 1.2, 2.0);
     left_machine.move_group->startStateMonitor();
+    left_machine.home_position = {
+        86.99, 20.40, 73.15, -110.59, 141.89, -28.94, 0.0
+    };
 
     ROS_INFO("Create Left Gripper Action Client");
     left_machine.gripper_client.reset(new GripperCommandActionClient(
@@ -832,6 +884,10 @@ int main(int argc, char* argv[])
     right_machine.move_group->setPlannerId("right_arm[arastar_bfs_manip]");
     right_machine.move_group->setWorkspace(-0.4, -1.2, 0.0, 1.10, 1.2, 2.0);
     right_machine.move_group->startStateMonitor();
+    right_machine.home_position = {
+        //-94.13, 19.62, -68.78, -102.20, 359.0, -114.55, 359.00
+        -79.38, 15.53, -68.79, -95.13, 359.0, -66.94, 79.95
+    };
 
     ROS_INFO("Create Right Gripper Action Client");
     right_machine.gripper_client.reset(new GripperCommandActionClient(
@@ -846,9 +902,11 @@ int main(int argc, char* argv[])
     auto r_mach_thread = std::thread(RunStateMachine, &right_machine);
 
     DoLocalizeConveyor();
+    ResetArms(&left_machine, &right_machine);
 
     ros::Rate loop_rate(1.0);
-    while (ros::ok) {
+    auto picks = 0;
+    while (ros::ok()) {
         // update objects
 
         // preconditions
@@ -856,23 +914,45 @@ int main(int argc, char* argv[])
         //    all other machines waiting for goals or moving to dropoff
         PickMachine* idle_machine = NULL;
         PickMachine* other_machine = NULL;
-        if (right_machine.curr_state == PickState::WaitForGoal) {
-            idle_machine = &right_machine;
-            other_machine = &left_machine;
-        } else if (left_machine.curr_state == PickState::WaitForGoal) {
-            idle_machine = &left_machine;
-            other_machine = &right_machine;
+
+        ROS_WARN("picks = %d", picks);
+        if ((picks & 1) == 0) {
+            if (right_machine.curr_state == PickState::WaitForGoal) {
+                idle_machine = &right_machine;
+                other_machine = &left_machine;
+            } else if (left_machine.curr_state == PickState::WaitForGoal) {
+                idle_machine = &left_machine;
+                other_machine = &right_machine;
+            }
+        } else {
+            if (left_machine.curr_state == PickState::WaitForGoal) {
+                idle_machine = &left_machine;
+                other_machine = &right_machine;
+            } else if (right_machine.curr_state == PickState::WaitForGoal) {
+                idle_machine = &right_machine;
+                other_machine = &left_machine;
+            }
         }
+
+//        if (right_machine.curr_state == PickState::WaitForGoal) {
+//            idle_machine = &right_machine;
+//            other_machine = &left_machine;
+//        } else if (left_machine.curr_state == PickState::WaitForGoal) {
+//            idle_machine = &left_machine;
+//            other_machine = &right_machine;
+//        }
 
         if (idle_machine != NULL &&
             (
-                other_machine->curr_state == PickState::WaitForGoal ||
-                other_machine->curr_state == PickState::ExecuteDropoff ||
-                other_machine->curr_state == PickState::OpenGripper
+                other_machine->curr_state == PickState::WaitForGoal //||
+//                other_machine->curr_state == PickState::ExecuteDropoff ||
+//                other_machine->curr_state == PickState::OpenGripper
             ))
         {
             // select a target object
-            TryPickObject(idle_machine, idle_machine == &left_machine);
+            if (TryPickObject(idle_machine, idle_machine == &left_machine)) {
+                ++picks;
+            }
         }
 
         loop_rate.sleep();
