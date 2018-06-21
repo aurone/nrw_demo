@@ -90,6 +90,7 @@ struct PickMachine
     ros::Time time_at_execute;
 
     double conveyor_speed;
+    double time_to_grasp;
 
     std::vector<double> home_position;
 
@@ -115,6 +116,10 @@ struct WorldState
 // truly global
 std::unique_ptr<tf::TransformBroadcaster> g_broadcaster;
 std::unique_ptr<tf::TransformListener> g_listener;
+const char* g_planning_frame = "odom_combined"; // TODO: take this from the MoveGroupInterface
+const char* g_robot_frame = "base_footprint";
+
+// an upper bound on the time to plan and execute the motion to a grasp location
 const double g_time_to_reach_grasp = 4.2;
 WorldState g_world_state;
 
@@ -146,7 +151,7 @@ bool TryHardTransformPose(
             g_listener->transformPose(frame_id, pose_in, pose_out);
             return true;
         } catch (...) {
-
+            ROS_INFO("Transform not available from '%s' to '%s'", pose_in.header.frame_id.c_str(), frame_id.c_str());
         }
         ros::Duration(0.01).sleep();
     }
@@ -206,6 +211,7 @@ void RemoveObject(WorldState* state, uint32_t id)
 // 6. downsample/filter samples for noise
 // 7. more weight to the recent samples
 bool EstimateObjectVelocity(
+    const ros::Time& now,
     const WorldObject* object,
     const std::string& frame_id,
     double span,
@@ -216,7 +222,7 @@ bool EstimateObjectVelocity(
     if (object->pose_estimates.empty()) return false;
 
     // not enough samples in time
-    auto& most_recent_time = object->pose_estimates.back().header.stamp;
+    auto& most_recent_time = now; //object->pose_estimates.back().header.stamp;
     auto span_begin = most_recent_time - ros::Duration(span);
     if (object->pose_estimates.front().header.stamp > span_begin) return false;
 
@@ -497,20 +503,25 @@ PickState DoWaitForGoal(PickMachine* mach)
     return PickState::Finished;
 }
 
-bool SendGoal(PickMachine* mach, const geometry_msgs::PoseStamped& grasp_pose_goal, double conveyor_speed)
+bool SendGoal(
+    PickMachine* mach,
+    const geometry_msgs::PoseStamped& grasp_pose_goal,
+    double conveyor_speed,
+    double time_to_grasp) // time for object to reach goal position
 {
     if (mach->goal_ready) return false; // we're busy
 
     geometry_msgs::PoseStamped grasp_pose_goal_global;
 
-    g_listener->waitForTransform("odom_combined", "base_footprint", ros::Time(0), ros::Duration(10.0));
-    TryHardTransformPose("odom_combined", grasp_pose_goal, grasp_pose_goal_global);
+    g_listener->waitForTransform(g_planning_frame, g_robot_frame, ros::Time(0), ros::Duration(10.0));
+    TryHardTransformPose(g_planning_frame, grasp_pose_goal, grasp_pose_goal_global);
 
     mach->grasp_pose_goal_base_footprint = grasp_pose_goal;
     mach->grasp_pose_goal = grasp_pose_goal_global;
 
     mach->time_at_execute = ros::Time::now();
     mach->conveyor_speed = conveyor_speed;
+    mach->time_to_grasp = time_to_grasp;
 
     mach->goal_ready = true;
     return true;
@@ -533,17 +544,24 @@ bool TryPickObject(PickMachine* mach, bool left)
             continue;
         }
 
+        auto now = ros::Time::now();
+
         geometry_msgs::Vector3Stamped vel;
         // have a good velocity estimate
-        if (EstimateObjectVelocity(&object, "base_footprint", 1.0, 2/*6*/, &vel)) {
+        try {
+        if (EstimateObjectVelocity(now, &object, g_robot_frame, 1.0, 2/*6*/, &vel)) {
             ROS_INFO("  Select object %u", object.id);
             auto& pose = object.pose_estimates.back().pose;
-            ROS_INFO("  Transform pose from '%s' to 'base_footprint'", pose.header.frame_id.c_str());
-            TryHardTransformPose("base_footprint", pose, object_pose);
-            ROS_INFO("  Transform velocity from '%s' to 'base_footprint'", vel.header.frame_id.c_str());
-            TryHardTransformVector("base_footprint", vel, object_vel);
+            ROS_INFO("  Transform pose from '%s' to '%s'", pose.header.frame_id.c_str(), g_robot_frame);
+            TryHardTransformPose(g_robot_frame, pose, object_pose);
+            ROS_INFO("  Transform velocity from '%s' to '%s'", vel.header.frame_id.c_str(), g_robot_frame);
+            TryHardTransformVector(g_robot_frame, vel, object_vel);
             found = true;
             break;
+        }
+        }
+        catch (...) {
+            ROS_ERROR("FUCK");
         }
     }
     UnlockWorldState(&g_world_state);
@@ -560,7 +578,7 @@ bool TryPickObject(PickMachine* mach, bool left)
     // Estimate the conveyor speed from samples //
     //////////////////////////////////////////////
 
-    double conveyor_speed = object_vel.vector.y;
+    auto conveyor_speed = -0.167; //object_vel.vector.y;
     ROS_INFO("Velocity of object is: (%f, %f, %f)", object_vel.vector.x, object_vel.vector.y, object_vel.vector.z);
 
     ////////////////////////////
@@ -577,7 +595,8 @@ bool TryPickObject(PickMachine* mach, bool left)
 
     geometry_msgs::PoseStamped grasp_pose_goal_local;
 
-    grasp_pose_goal_local.header.frame_id = "base_footprint";
+    // NOTE: object poses assumed to be stored in the robot's local frame (base_footprint)
+    grasp_pose_goal_local.header.frame_id = g_robot_frame;
 
     // final pose of the object after speed estimation + minor adjustment
     grasp_pose_goal_local.pose.position.x = object_pose.pose.position.x + 0.01;
@@ -598,6 +617,9 @@ bool TryPickObject(PickMachine* mach, bool left)
         grasp_pose_goal_local.pose.position.y = std::min(grasp_pose_goal_local.pose.position.y, 0.40);
     }
 
+    auto time_to_grasp = std::fabs((object_pose.pose.position.y - grasp_pose_goal_local.pose.position.y) /
+            conveyor_speed);
+
     // check if the object will be unreachable by the time we get there
     ROS_INFO("Picking at y: %f ", grasp_pose_goal_local.pose.position.y);
     if (!left) {
@@ -613,7 +635,7 @@ bool TryPickObject(PickMachine* mach, bool left)
         }
     }
 
-    return SendGoal(mach, grasp_pose_goal_local, conveyor_speed);
+    return SendGoal(mach, grasp_pose_goal_local, conveyor_speed, time_to_grasp);
 }
 
 PickState DoExecutePickup(PickMachine* mach)
@@ -717,8 +739,8 @@ PickState DoGraspObject(PickMachine* mach)
     geometry_msgs::PoseStamped marker_pose_in_base_foot;
     m.pose.header.frame_id = m.header.frame_id;
 
-    g_listener->waitForTransform("base_footprint", "ar_marker_7", ros::Time(0), ros::Duration(10.0));
-    g_listener->transformPose("base_footprint", m.pose, marker_pose_in_base_foot);
+    g_listener->waitForTransform(g_robot_frame, "ar_marker_7", ros::Time(0), ros::Duration(10.0));
+    g_listener->transformPose(g_robot_frame, m.pose, marker_pose_in_base_foot);
 
     double y1 = marker_pose_in_base_foot.pose.position.y;
     double y2 = mach->grasp_pose_goal_base_footprint.pose.position.y;
@@ -727,12 +749,21 @@ PickState DoGraspObject(PickMachine* mach)
     ROS_INFO("Object is at a distance of: %f", dist);
     double wait_time = dist / mach->conveyor_speed;
 #else
-    double buffer_time = 0.05 / mach->conveyor_speed;
+    double buffer_time = 0.05 / std::fabs(mach->conveyor_speed);
 
+    ROS_INFO("Wait an additional %f", buffer_time);
+
+    // how long it actually took to plan and execute the arm motion
     ros::Duration execution_duration = ros::Time::now() - mach->time_at_execute;
-    double wait_time = std::max(g_time_to_reach_grasp - execution_duration.toSec(), 0.0);
+
+    double wait_time = std::max(/*g_time_to_reach_grasp*/ mach->time_to_grasp - execution_duration.toSec(), 0.0);
     wait_time += buffer_time;
 #endif
+    if (wait_time < 0.0) {
+        ROS_WARN("It actually took us %f seconds to reach the grasp pose", execution_duration.toSec());
+        wait_time = std::max(wait_time, 0.0);
+    }
+
     ROS_INFO("Waiting before grasp for %f secs", wait_time);
     ros::Duration(wait_time).sleep();
 
@@ -815,12 +846,26 @@ PickState DoOpenGripper(PickMachine* mach)
 auto MakeConveyorCollisionObject() -> moveit_msgs::CollisionObject
 {
     moveit_msgs::CollisionObject conveyor;
-    conveyor.header.frame_id = "base_footprint";
+
+    double height = 0.64;
+
+    geometry_msgs::PoseStamped p;
+    p.header.frame_id = g_robot_frame;
+    p.header.stamp = ros::Time(0); //ros::Time::now();
+    p.pose.position.x = 0.60; //0.62;
+    p.pose.position.y = 0.0;
+    p.pose.position.z = 0.5 * height;
+    p.pose.orientation.w = 1.0;
+
+    geometry_msgs::PoseStamped p_out;
+    ROS_INFO("Transform conveyor object to planning frame");
+    TryHardTransformPose(g_planning_frame, p, p_out);
+    ROS_INFO("...done");
+
+    conveyor.header.frame_id = g_planning_frame;
     conveyor.header.stamp = ros::Time::now();
 
     conveyor.id = "conveyor";
-
-    double height = 0.64;
 
     shape_msgs::SolidPrimitive conveyor_shape;
     conveyor_shape.type = shape_msgs::SolidPrimitive::BOX;
@@ -831,10 +876,13 @@ auto MakeConveyorCollisionObject() -> moveit_msgs::CollisionObject
     conveyor.primitives.push_back(conveyor_shape);
 
     geometry_msgs::Pose conveyor_pose;
-    conveyor_pose.position.x = 0.60; //0.62;
-    conveyor_pose.position.y = 0.0;
-    conveyor_pose.position.z = 0.5 * height;
-    conveyor_pose.orientation.w = 1.0;
+    conveyor_pose.position.x = p_out.pose.position.x;
+    conveyor_pose.position.y = p_out.pose.position.y;
+    conveyor_pose.position.z = p_out.pose.position.z;
+    conveyor_pose.orientation.w = p_out.pose.orientation.w;
+    conveyor_pose.orientation.x = p_out.pose.orientation.x;
+    conveyor_pose.orientation.y = p_out.pose.orientation.y;
+    conveyor_pose.orientation.z = p_out.pose.orientation.z;
     conveyor.primitive_poses.push_back(conveyor_pose);
 
     conveyor.operation = moveit_msgs::CollisionObject::ADD;
@@ -909,6 +957,15 @@ int main(int argc, char* argv[])
 {
     ros::init(argc, argv, "demo_executive");
     ros::NodeHandle nh;
+    ros::NodeHandle ph("~");
+
+    std::string l_arm_action_name;
+    std::string r_arm_action_name;
+    ph.param<std::string>("l_arm_action_name", l_arm_action_name, "l_arm_controller");
+    ph.param<std::string>("r_arm_action_name", r_arm_action_name, "r_arm_controller");
+
+    double allowed_planning_time;
+    ph.param("allowed_planning_time", allowed_planning_time, 1.0);
 
     ros::AsyncSpinner spinner(2);
     spinner.start();
@@ -940,7 +997,7 @@ int main(int argc, char* argv[])
     left_machine.goal_ready = false;
     left_machine.move_group.reset(new MoveGroup(
                 "left_arm", boost::shared_ptr<tf::Transformer>(), ros::WallDuration(25.0)));
-    left_machine.move_group->setPlanningTime(10.0);
+    left_machine.move_group->setPlanningTime(allowed_planning_time);
     left_machine.move_group->setPlannerId("left_arm[arastar_bfs_manip]");
     left_machine.move_group->setWorkspace(-0.4, -1.2, 0.0, 1.10, 1.2, 2.0);
     left_machine.move_group->startStateMonitor();
@@ -958,7 +1015,7 @@ int main(int argc, char* argv[])
 
     ROS_INFO("Create Left Arm Follow Joint Trajectory Action Client");
     left_machine.follow_joint_trajectory_client.reset(new FollowJointTrajectoryActionClient(
-                "l_arm_controller/follow_joint_trajectory"));
+                l_arm_action_name + "/follow_joint_trajectory"));
     if (!left_machine.follow_joint_trajectory_client->waitForServer(ros::Duration(10.0))) {
         ROS_ERROR("Follow Joint Trajectory client not available");
         return 1;
@@ -975,7 +1032,7 @@ int main(int argc, char* argv[])
                 "right_arm", boost::shared_ptr<tf::Transformer>(), ros::WallDuration(25.0)));
     right_machine.gripper_command_client.reset(new GripperCommandActionClient(
                 "r_gripper_controller/gripper_action"));
-    right_machine.move_group->setPlanningTime(10.0);
+    right_machine.move_group->setPlanningTime(allowed_planning_time);
     right_machine.move_group->setPlannerId("right_arm[arastar_bfs_manip]");
     right_machine.move_group->setWorkspace(-0.4, -1.2, 0.0, 1.10, 1.2, 2.0);
     right_machine.move_group->startStateMonitor();
@@ -994,7 +1051,7 @@ int main(int argc, char* argv[])
 
     ROS_INFO("Create Right Arm Follow Joint Trajectory Action Client");
     right_machine.follow_joint_trajectory_client.reset(new FollowJointTrajectoryActionClient(
-                "r_arm_controller/follow_joint_trajectory"));
+                r_arm_action_name + "/follow_joint_trajectory"));
     if (!right_machine.follow_joint_trajectory_client->waitForServer(ros::Duration(10.0))) {
         ROS_ERROR("Follow Joint Trajectory client not available");
         return 1;
