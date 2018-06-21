@@ -15,7 +15,7 @@ int main(int argc, char* argv[])
     auto conveyor_width = 2.14;
     auto conveyor_height = 0.64;
 
-    auto conveyor_pos_x = 0.50;
+    auto conveyor_pos_x = 0.40;
 
     // the right-hand side of the conveyor aligns with center of the robot
     auto conveyor_pos_y = 0.5 * conveyor_width - 0.4;
