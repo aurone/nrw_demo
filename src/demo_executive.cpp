@@ -49,6 +49,7 @@ enum struct PickState
     PrepareGripper = 0,
     WaitForGoal,
     ExecutePickup,
+    PlanPickup,
     GraspObject,
     CloseGripper,
     // distinguish between planning and execution for dropoff so that we can
@@ -94,6 +95,7 @@ struct PickMachine
 
     std::vector<double> home_position;
 
+    MoveGroup::Plan pickup_plan;
     MoveGroup::Plan dropoff_plan;
 
     geometry_msgs::PoseStamped grasp_pose_goal_base_footprint;
@@ -190,7 +192,7 @@ void UpdateWorldState(
         if (!found) {
             WorldObject object;
             object.id = marker.id;
-            object.pose_estimates.resize(30);
+            object.pose_estimates.set_capacity(30);
             object.claimed = false;
             state->objects.push_back(object);
         }
@@ -224,6 +226,64 @@ bool EstimateObjectVelocity(
     int min_samples,
     geometry_msgs::Vector3Stamped* vel)
 {
+    ROS_DEBUG("Estimate velocity for object %u", object->id);
+
+    if (object->pose_estimates.size() < 2) {
+        ROS_DEBUG(" -> Insufficient pose estimates");
+        return false;
+    }
+
+    vel->vector.x = 0.0;
+    vel->vector.y = 0.0;
+    vel->vector.z = 0.0;
+
+    // use at least 1 (current) velocity sample...if we have more than one...drop all that are too old
+    auto span_begin = now - ros::Duration(span);
+
+    // check for sufficient samples within time span
+    auto samples = 0;
+    for (size_t i = object->pose_estimates.size() - 1; i >= 1; --i) {
+        auto& curr_pose = object->pose_estimates[i].pose;
+        auto& prev_pose = object->pose_estimates[i - 1].pose;
+
+        if (curr_pose.header.stamp < now - ros::Duration(1.0) ||
+            prev_pose.header.stamp < now - ros::Duration(1.0))
+        {
+            ROS_DEBUG(" -> Sample pair too old!");
+            continue;
+        }
+
+        // sufficient samples and remaining data is too old to care about
+        if (samples >= 1 && object->pose_estimates[i].header.stamp < span_begin) {
+            ROS_DEBUG(" -> Got enough samples!");
+            break;
+        }
+
+        auto dx = (curr_pose.pose.position.x - prev_pose.pose.position.x);
+        auto dy = (curr_pose.pose.position.y - prev_pose.pose.position.y);
+        auto dz = (curr_pose.pose.position.z - prev_pose.pose.position.z);
+        auto dt = curr_pose.header.stamp.toSec() - prev_pose.header.stamp.toSec();
+        vel->vector.x += dx / dt;
+        vel->vector.y += dy / dt;
+        vel->vector.z += dz / dt;
+        ROS_DEBUG("  -> Sample v = (%f, %f, %f) / %f", dx, dy, dz, dt);
+
+        ++samples;
+    }
+
+    if (samples == 0) {
+        ROS_DEBUG(" -> No recent velocity samples");
+        return false;
+    }
+
+    vel->vector.x /= (double)samples;
+    vel->vector.y /= (double)samples;
+    vel->vector.z /= (double)samples;
+
+    vel->header = object->pose_estimates.back().pose.header;
+    return true;
+
+#if 0
     // no samples at all...
     if (object->pose_estimates.empty()) return false;
 
@@ -259,6 +319,7 @@ bool EstimateObjectVelocity(
     vel->header = object->pose_estimates.back().pose.header;
 
     return true;
+#endif
 }
 
 ///////////////////////////
@@ -387,6 +448,7 @@ auto to_cstring(PickState state) -> const char*
     switch (state) {
     case PickState::PrepareGripper:     return "PrepareGripper";
     case PickState::WaitForGoal:        return "WaitForGoal";
+    case PickState::PlanPickup:         return "PlanPickup";
     case PickState::ExecutePickup:      return "ExecutePickup";
     case PickState::GraspObject:        return "GraspObject";
     case PickState::CloseGripper:       return "CloseGripper";
@@ -501,7 +563,7 @@ PickState DoWaitForGoal(PickMachine* mach)
     while (ros::ok()) {
         if (mach->goal_ready) {
             mach->goal_ready = false; // consume goal
-            return PickState::ExecutePickup;
+            return PickState::PlanPickup;
         }
         ros::Duration(1.0).sleep();
     }
@@ -585,7 +647,8 @@ bool TryPickObject(PickMachine* mach, bool left)
     // Estimate the conveyor speed from samples //
     //////////////////////////////////////////////
 
-    auto conveyor_speed = -0.167; //object_vel.vector.y;
+    auto conveyor_speed = object_vel.vector.y;
+    // auto conveyor_speed = mach->conveyor_speed;
     ROS_INFO("Velocity of object is: (%f, %f, %f)", object_vel.vector.x, object_vel.vector.y, object_vel.vector.z);
 
     ////////////////////////////
@@ -650,30 +713,33 @@ bool TryPickObject(PickMachine* mach, bool left)
     return SendGoal(mach, grasp_pose_goal_local, conveyor_speed, time_to_grasp);
 }
 
-PickState DoExecutePickup(PickMachine* mach)
+PickState DoPlanPickup(PickMachine* mach)
 {
-    ROS_INFO("Move link '%s' to grasp pose", mach->move_group->getEndEffectorLink().c_str());
-#if 1
-    // geometry_msgs::Pose tip_pose;
-    // tip_pose.orientation.x = 0.726;
-    // tip_pose.orientation.y = 0.687;
-    // tip_pose.orientation.z = 0.015;
-    // tip_pose.orientation.w = 0.018;
-    // tip_pose.position.x = 0.502;
-    // tip_pose.position.y = -0.403;
-    // tip_pose.position.z = 1.007;
+    ROS_INFO("Plan link '%s' to grasp pose", mach->move_group->getEndEffectorLink().c_str());
     WaitForMoveGroup();
 
     g_move_group_busy = true;
     mach->move_group->setPoseTarget(mach->grasp_pose_goal.pose);
-    auto err = mach->move_group->move();
+    auto err = mach->move_group->plan(mach->pickup_plan);
     g_move_group_busy = false;
 
     if (err.val != moveit_msgs::MoveItErrorCodes::SUCCESS) {
         ROS_ERROR("Failed to move arm to grasp pose");
         return PickState::WaitForGoal;
     }
-#endif
+
+    return PickState::ExecutePickup;
+}
+
+PickState DoExecutePickup(PickMachine* mach)
+{
+    control_msgs::FollowJointTrajectoryGoal goal;
+    goal.trajectory = mach->pickup_plan.trajectory_.joint_trajectory;
+    auto state = mach->follow_joint_trajectory_client->sendGoalAndWait(goal);
+    if (state != actionlib::SimpleClientGoalState::SUCCEEDED) {
+        ROS_ERROR("maybe should move to home?!");
+    }
+
     return PickState::GraspObject;
 }
 
@@ -1006,6 +1072,7 @@ int main(int argc, char* argv[])
     PickMachState states[(int)PickState::Count];
     states[(int)PickState::PrepareGripper].pump = DoPrepareGripper;
     states[(int)PickState::WaitForGoal].pump = DoWaitForGoal;
+    states[(int)PickState::PlanPickup].pump = DoPlanPickup;
     states[(int)PickState::ExecutePickup].pump = DoExecutePickup;
     states[(int)PickState::GraspObject].pump = DoGraspObject;
     states[(int)PickState::CloseGripper].pump = DoCloseGripper;
@@ -1089,7 +1156,7 @@ int main(int argc, char* argv[])
     DoLocalizeConveyor();
     ResetArms(&left_machine, &right_machine);
 
-    ros::Rate loop_rate(1.0);
+    ros::Rate loop_rate(30.0);
     auto picks = 0;
     while (ros::ok()) {
         // update objects
@@ -1132,7 +1199,7 @@ int main(int argc, char* argv[])
 
         if (idle_machine != NULL &&
             (
-                other_machine->curr_state != PickState::ExecutePickup
+                other_machine->curr_state != PickState::PlanPickup
 #if 0
                 ||
                 other_machine->curr_state == PickState::WaitForGoal ||
