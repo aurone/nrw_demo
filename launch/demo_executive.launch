@@ -1,0 +1,7 @@
+<launch>
+    <node name="demo_executive" pkg="nrw_demo" type="demo_executive">
+        <param name="l_arm_action_name" value="pr2_l_arm_controller"/>
+        <param name="r_arm_action_name" value="pr2_r_arm_controller"/>
+        <param name="allowed_planning_time" value="1.0"/>
+    </node>
+</launch>
