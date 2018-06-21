@@ -1,5 +1,6 @@
 #include <assert.h>
 #include <atomic>
+#include <limits>
 #include <memory>
 #include <unordered_map>
 #include <mutex>
@@ -92,6 +93,7 @@ struct PickMachine
 
     double conveyor_speed;
     double time_to_grasp;
+    uint32_t claimed_id = std::numeric_limits<uint32_t>::max();
 
     std::vector<double> home_position;
 
@@ -560,6 +562,16 @@ PickState DoPrepareGripper(PickMachine* mach)
 
 PickState DoWaitForGoal(PickMachine* mach)
 {
+    if (mach->claimed_id != std::numeric_limits<uint32_t>::max()) {
+        LockWorldState(&g_world_state);
+        for (auto& object : g_world_state.objects) {
+            if (object.id == mach->claimed_id) {
+                object.claimed = false;
+                break;
+            }
+        }
+        UnlockWorldState(&g_world_state);
+    }
     while (ros::ok()) {
         if (mach->goal_ready) {
             mach->goal_ready = false; // consume goal
@@ -575,7 +587,8 @@ bool SendGoal(
     PickMachine* mach,
     const geometry_msgs::PoseStamped& grasp_pose_goal,
     double conveyor_speed,
-    double time_to_grasp) // time for object to reach goal position
+    double time_to_grasp,
+    uint32_t claimed_id) // time for object to reach goal position
 {
     if (mach->goal_ready) return false; // we're busy
 
@@ -590,6 +603,7 @@ bool SendGoal(
     mach->time_at_execute = ros::Time::now();
     mach->conveyor_speed = conveyor_speed;
     mach->time_to_grasp = time_to_grasp;
+    mach->claimed_id = claimed_id;
 
     // TODO: GUARANTEE THAT STATE MACHINE IS IN EXECUTE_PICKUP STAGE BEFORE EXITING
     mach->goal_ready = true; 
@@ -602,6 +616,7 @@ bool TryPickObject(PickMachine* mach, bool left)
 
     geometry_msgs::PoseStamped object_pose;
     geometry_msgs::Vector3Stamped object_vel;
+    uint32_t claimed_id = 0;
     bool found = false;
 
     LockWorldState(&g_world_state);
@@ -625,6 +640,8 @@ bool TryPickObject(PickMachine* mach, bool left)
             TryHardTransformPose(g_robot_frame, pose, object_pose);
             ROS_INFO("  Transform velocity from '%s' to '%s'", vel.header.frame_id.c_str(), g_robot_frame);
             TryHardTransformVector(g_robot_frame, vel, object_vel);
+            object.claimed = true;
+            claimed_id = object.id;
             found = true;
             break;
         }
@@ -639,6 +656,18 @@ bool TryPickObject(PickMachine* mach, bool left)
         ROS_INFO("  No reasonable estimates of object velocity");
         return false; // no object with a reasonable estimate
     }
+
+    auto unclaim_object = [&]()
+    {
+        LockWorldState(&g_world_state);
+        for (auto& object : g_world_state.objects) {
+            if (object.id == claimed_id) {
+                object.claimed = false;
+                break;
+            }
+        }
+        UnlockWorldState(&g_world_state);
+    };
 
     // OLD FUNCTIONALITY: get 6 samples, evenly spaced every 0.2 seconds and
     // compute the average velocity at any point in the path
@@ -698,11 +727,13 @@ bool TryPickObject(PickMachine* mach, bool left)
         if (grasp_pose_goal_local.pose.position.y < -0.4) {
             // TODO: add this to criteria for selecting object
             ROS_INFO(" -> Sorry! that was too fast");
+            unclaim_object();
             return false;
         }
     } else {
         if (grasp_pose_goal_local.pose.position.y < 0.05) {
             ROS_INFO(" -> Sorry! that was too fast");
+            unclaim_object();
             return false;
         }
     }
@@ -710,7 +741,12 @@ bool TryPickObject(PickMachine* mach, bool left)
     // TRANSFORM tool frame goal to wrist frame goal
     grasp_pose_goal_local.pose.position.y -= 0.18; 
 
-    return SendGoal(mach, grasp_pose_goal_local, conveyor_speed, time_to_grasp);
+    if (!SendGoal(mach, grasp_pose_goal_local, conveyor_speed, time_to_grasp, claimed_id)) {
+        unclaim_object();
+        return false;
+    } else {
+        return true;
+    }
 }
 
 PickState DoPlanPickup(PickMachine* mach)
