@@ -18,6 +18,9 @@ stuff "roslaunch pr2_sbpl_interface_config move_group.launch"
 screen -t demo
 stuff "rosrun nrw_demo demo_executive"
 
+screen -t track
+stuff "rosrun object_track tracker input:=/head_mount_kinect/depth_registered/points"
+
 # (robot)
 #roslaunch rgbd_assembler openni_new_node.launch
 
