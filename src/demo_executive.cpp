@@ -1026,7 +1026,8 @@ int main(int argc, char* argv[])
     left_machine.move_group->setWorkspace(-0.4, -1.2, 0.0, 1.10, 1.2, 2.0);
     left_machine.move_group->startStateMonitor();
     left_machine.home_position = {
-        86.99, 20.40, 73.15, -110.59, 141.89, -28.94, 0.0
+//        86.99, 20.40, 73.15, -110.59, 141.89, -28.94, 0.0
+        94.72, 5.16, 160.66, -89.70, 106.84, -110.93, 1.00
     };
 
     ROS_INFO("Create Left Gripper Command Action Client");
