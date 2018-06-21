@@ -876,7 +876,7 @@ auto MakeConveyorCollisionObject() -> moveit_msgs::CollisionObject
     geometry_msgs::PoseStamped p;
     p.header.frame_id = g_robot_frame;
     p.header.stamp = ros::Time(0); //ros::Time::now();
-    p.pose.position.x = 0.60; //0.62;
+    p.pose.position.x = 0.40; //0.62;
     p.pose.position.y = 0.0;
     p.pose.position.z = 0.5 * height;
     p.pose.orientation.w = 1.0;
