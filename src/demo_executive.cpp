@@ -118,10 +118,16 @@ std::unique_ptr<tf::TransformBroadcaster> g_broadcaster;
 std::unique_ptr<tf::TransformListener> g_listener;
 const char* g_planning_frame = "odom_combined"; // TODO: take this from the MoveGroupInterface
 const char* g_robot_frame = "base_footprint";
+std::atomic<bool> g_move_group_busy(false);
 
 // an upper bound on the time to plan and execute the motion to a grasp location
 const double g_time_to_reach_grasp = 4.2;
 WorldState g_world_state;
+
+void WaitForMoveGroup()
+{
+    while (g_move_group_busy) { ros::Duration(0.02).sleep(); }
+}
 
 bool TryHardTransformVector(
     const std::string& frame_id,
@@ -523,7 +529,8 @@ bool SendGoal(
     mach->conveyor_speed = conveyor_speed;
     mach->time_to_grasp = time_to_grasp;
 
-    mach->goal_ready = true;
+    // TODO: GUARANTEE THAT STATE MACHINE IS IN EXECUTE_PICKUP STAGE BEFORE EXITING
+    mach->goal_ready = true; 
     return true;
 }
 
@@ -610,6 +617,8 @@ bool TryPickObject(PickMachine* mach, bool left)
     grasp_pose_goal_local.pose.orientation.x = grasp_pose_goal_local.pose.orientation.y = 0.0;
     grasp_pose_goal_local.pose.orientation.z = grasp_pose_goal_local.pose.orientation.w = 0.5 * sqrt(2.0);
 
+    // NOTE: workspace boundaries are w.r.t. the tool frame
+
     // limit the grasp goal to be reachable (not too far ahead of the robot)
     if (!left) {
         grasp_pose_goal_local.pose.position.y = std::min(grasp_pose_goal_local.pose.position.y, -0.05);
@@ -635,6 +644,9 @@ bool TryPickObject(PickMachine* mach, bool left)
         }
     }
 
+    // TRANSFORM tool frame goal to wrist frame goal
+    grasp_pose_goal_local.pose.position.y -= 0.18; 
+
     return SendGoal(mach, grasp_pose_goal_local, conveyor_speed, time_to_grasp);
 }
 
@@ -650,8 +662,13 @@ PickState DoExecutePickup(PickMachine* mach)
     // tip_pose.position.x = 0.502;
     // tip_pose.position.y = -0.403;
     // tip_pose.position.z = 1.007;
+    WaitForMoveGroup();
+
+    g_move_group_busy = true;
     mach->move_group->setPoseTarget(mach->grasp_pose_goal.pose);
     auto err = mach->move_group->move();
+    g_move_group_busy = false;
+
     if (err.val != moveit_msgs::MoveItErrorCodes::SUCCESS) {
         ROS_ERROR("Failed to move arm to grasp pose");
         return PickState::WaitForGoal;
@@ -796,6 +813,9 @@ PickState DoCloseGripper(PickMachine* mach)
 
 PickState DoPlanDropoff(PickMachine* mach)
 {
+    WaitForMoveGroup();
+    g_move_group_busy = true;
+
     auto v = mach->home_position;
     for (auto& value : v) {
         value *= M_PI / 180.0;
@@ -809,6 +829,8 @@ PickState DoPlanDropoff(PickMachine* mach)
         // we should literally execute the pickup plan in reverse ...probably...
         ROS_ERROR("PRETTY BAD! GOING NOWHERE!");
     }
+
+    g_move_group_busy = false;
 
     return PickState::ExecuteDropoff;
 }
@@ -1107,9 +1129,13 @@ int main(int argc, char* argv[])
 
         if (idle_machine != NULL &&
             (
+                other_machine->curr_state != PickState::ExecutePickup
+#if 0
+                ||
                 other_machine->curr_state == PickState::WaitForGoal ||
                 other_machine->curr_state == PickState::ExecuteDropoff ||
                 other_machine->curr_state == PickState::OpenGripper
+#endif
             ))
         {
             // select a target object
