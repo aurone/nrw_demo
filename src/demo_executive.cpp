@@ -781,6 +781,8 @@ PickState DoGraspObject(PickMachine* mach)
         wait_time = std::max(wait_time, 0.0);
     }
 
+    wait_time = std::min(wait_time, 10.0); // hurp durp, take this from conveyor length / conveyor_speed
+
     ROS_INFO("Waiting before grasp for %f secs", wait_time);
     ros::Duration(wait_time).sleep();
 
