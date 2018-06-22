@@ -91,6 +91,12 @@ struct PickMachine
 
     ros::Time time_at_execute;
 
+    double time_to_reach_grasp = 4.2;
+
+    // NOTE: workspace boundaries are w.r.t. the tool frame
+    double min_workspace_y;
+    double max_workspace_y;
+
     double conveyor_speed;
     double time_to_grasp;
     uint32_t claimed_id = std::numeric_limits<uint32_t>::max();
@@ -125,7 +131,6 @@ const char* g_robot_frame = "base_footprint";
 std::atomic<bool> g_move_group_busy(false);
 
 // an upper bound on the time to plan and execute the motion to a grasp location
-const double g_time_to_reach_grasp = 4.2;
 WorldState g_world_state;
 
 void WaitForMoveGroup()
@@ -195,10 +200,15 @@ void UpdateWorldState(
             WorldObject object;
             object.id = marker.id;
             object.pose_estimates.set_capacity(30);
+            object.pose_estimates.push_back(marker);
+            object.pose_estimates.back().header.frame_id = "base_footprint";
+            object.pose_estimates.back().pose.header.frame_id = "base_footprint";
             object.claimed = false;
             state->objects.push_back(object);
         }
     }
+
+    // TODO: forget old stuff
 }
 
 void RemoveObject(WorldState* state, uint32_t id)
@@ -212,6 +222,8 @@ void RemoveObject(WorldState* state, uint32_t id)
 }
 
 // possible criteria for ensuring a good estimate
+// OLD FUNCTIONALITY: get 6 samples, evenly spaced every 0.2 seconds and
+// compute the average velocity at any point in the path
 // 0. recent timestamps
 // 1. sufficient number of samples
 // 2. sufficient history in time
@@ -610,73 +622,15 @@ bool SendGoal(
     return true;
 }
 
-bool TryPickObject(PickMachine* mach, bool left)
+bool ComputeGraspGoal(
+    PickMachine* mach,
+    const geometry_msgs::PoseStamped& object_pose,
+    const geometry_msgs::Vector3Stamped& object_vel,
+    geometry_msgs::PoseStamped* grasp_pose_goal,
+    double* conveyor_speed,
+    double* time_to_grasp)
 {
-    ROS_INFO("Try to pick object");
-
-    geometry_msgs::PoseStamped object_pose;
-    geometry_msgs::Vector3Stamped object_vel;
-    uint32_t claimed_id = 0;
-    bool found = false;
-
-    LockWorldState(&g_world_state);
-    // select an object
-    for (auto& object : g_world_state.objects) {
-        // skip claimed objects
-        if (object.claimed) {
-            ROS_INFO(" -> Skip claimed object '%u'", object.id);
-            continue;
-        }
-
-        auto now = ros::Time::now();
-
-        geometry_msgs::Vector3Stamped vel;
-        // have a good velocity estimate
-        try {
-        if (EstimateObjectVelocity(now, &object, g_robot_frame, 1.0, 2/*6*/, &vel)) {
-            ROS_INFO("  Select object %u", object.id);
-            auto& pose = object.pose_estimates.back().pose;
-            ROS_INFO("  Transform pose from '%s' to '%s'", pose.header.frame_id.c_str(), g_robot_frame);
-            TryHardTransformPose(g_robot_frame, pose, object_pose);
-            ROS_INFO("  Transform velocity from '%s' to '%s'", vel.header.frame_id.c_str(), g_robot_frame);
-            TryHardTransformVector(g_robot_frame, vel, object_vel);
-            object.claimed = true;
-            claimed_id = object.id;
-            found = true;
-            break;
-        }
-        }
-        catch (...) {
-            ROS_ERROR("FUCK");
-        }
-    }
-    UnlockWorldState(&g_world_state);
-
-    if (!found) {
-        ROS_INFO("  No reasonable estimates of object velocity");
-        return false; // no object with a reasonable estimate
-    }
-
-    auto unclaim_object = [&]()
-    {
-        LockWorldState(&g_world_state);
-        for (auto& object : g_world_state.objects) {
-            if (object.id == claimed_id) {
-                object.claimed = false;
-                break;
-            }
-        }
-        UnlockWorldState(&g_world_state);
-    };
-
-    // OLD FUNCTIONALITY: get 6 samples, evenly spaced every 0.2 seconds and
-    // compute the average velocity at any point in the path
-
-    //////////////////////////////////////////////
-    // Estimate the conveyor speed from samples //
-    //////////////////////////////////////////////
-
-    auto conveyor_speed = object_vel.vector.y;
+    *conveyor_speed = object_vel.vector.y;
     // auto conveyor_speed = mach->conveyor_speed;
     ROS_INFO("Velocity of object is: (%f, %f, %f)", object_vel.vector.x, object_vel.vector.y, object_vel.vector.z);
 
@@ -689,57 +643,103 @@ bool TryPickObject(PickMachine* mach, bool left)
 
     // how far the object will have moved during the time it takes to close the
     // gripper
-    auto g_grasp_offset = g_time_to_reach_grasp * conveyor_speed;
-    ROS_INFO("Pick at the offset: %f ", g_grasp_offset);
-
-    geometry_msgs::PoseStamped grasp_pose_goal_local;
+    auto grasp_offset = mach->time_to_reach_grasp * (*conveyor_speed);
+    ROS_INFO("Pick at the offset: %f ", grasp_offset);
 
     // NOTE: object poses assumed to be stored in the robot's local frame (base_footprint)
-    grasp_pose_goal_local.header.frame_id = g_robot_frame;
+    grasp_pose_goal->header.frame_id = g_robot_frame;
 
     // final pose of the object after speed estimation + minor adjustment
-    grasp_pose_goal_local.pose.position.x = object_pose.pose.position.x + 0.01;
+    grasp_pose_goal->pose.position.x = object_pose.pose.position.x + 0.01;
 
     // final pose of object after speed estimation + distance object will travel
     // during arm execution
-    grasp_pose_goal_local.pose.position.y = object_pose.pose.position.y + g_grasp_offset;
+    grasp_pose_goal->pose.position.y = object_pose.pose.position.y + grasp_offset;
 
     // hardcoded :)
-    grasp_pose_goal_local.pose.position.z = 0.73; //+= 0.05;
-    grasp_pose_goal_local.pose.orientation.x = grasp_pose_goal_local.pose.orientation.y = 0.0;
-    grasp_pose_goal_local.pose.orientation.z = grasp_pose_goal_local.pose.orientation.w = 0.5 * sqrt(2.0);
-
-    // NOTE: workspace boundaries are w.r.t. the tool frame
+    grasp_pose_goal->pose.position.z = 0.73; //+= 0.05;
+    grasp_pose_goal->pose.orientation.x = grasp_pose_goal->pose.orientation.y = 0.0;
+    grasp_pose_goal->pose.orientation.z = grasp_pose_goal->pose.orientation.w = 0.5 * sqrt(2.0);
 
     // limit the grasp goal to be reachable (not too far ahead of the robot)
-    if (!left) {
-        grasp_pose_goal_local.pose.position.y = std::min(grasp_pose_goal_local.pose.position.y, -0.05);
-    } else {
-        grasp_pose_goal_local.pose.position.y = std::min(grasp_pose_goal_local.pose.position.y, 0.40);
-    }
+    grasp_pose_goal->pose.position.y = std::min(grasp_pose_goal->pose.position.y, mach->max_workspace_y);
 
-    auto time_to_grasp = std::fabs((object_pose.pose.position.y - grasp_pose_goal_local.pose.position.y) /
-            conveyor_speed);
+    *time_to_grasp = std::fabs((object_pose.pose.position.y - grasp_pose_goal->pose.position.y) / (*conveyor_speed));
 
     // check if the object will be unreachable by the time we get there
-    ROS_INFO("Picking at y: %f ", grasp_pose_goal_local.pose.position.y);
-    if (!left) {
-        if (grasp_pose_goal_local.pose.position.y < -0.4) {
-            // TODO: add this to criteria for selecting object
-            ROS_INFO(" -> Sorry! that was too fast");
-            unclaim_object();
-            return false;
-        }
-    } else {
-        if (grasp_pose_goal_local.pose.position.y < 0.05) {
-            ROS_INFO(" -> Sorry! that was too fast");
-            unclaim_object();
-            return false;
-        }
+    ROS_INFO("Picking at y: %f ", grasp_pose_goal->pose.position.y);
+    if (grasp_pose_goal->pose.position.y < mach->min_workspace_y) {
+        // TODO: add this to criteria for selecting object
+        ROS_INFO(" -> Sorry! that was too fast");
+        return false;
     }
 
     // TRANSFORM tool frame goal to wrist frame goal
-    grasp_pose_goal_local.pose.position.y -= 0.18; 
+    grasp_pose_goal->pose.position.y -= 0.18; 
+    return true;
+}
+
+bool TryPickObject(PickMachine* mach, bool lock = true)
+{
+    ROS_INFO("Try to pick object");
+
+    geometry_msgs::PoseStamped object_pose;
+    geometry_msgs::Vector3Stamped object_vel;
+    uint32_t claimed_id = 0;
+    bool found = false;
+
+    if (lock) LockWorldState(&g_world_state);
+    // select an object
+    for (auto& object : g_world_state.objects) {
+        // skip claimed objects
+        if (object.claimed) {
+            ROS_INFO(" -> Skip claimed object '%u'", object.id);
+            continue;
+        }
+
+        auto now = ros::Time::now();
+
+        geometry_msgs::Vector3Stamped vel;
+        // have a good velocity estimate
+        if (EstimateObjectVelocity(now, &object, g_robot_frame, 1.0, 2/*6*/, &vel)) {
+            ROS_INFO("  Select object %u", object.id);
+            auto& pose = object.pose_estimates.back().pose;
+            ROS_INFO("  Transform pose from '%s' to '%s'", pose.header.frame_id.c_str(), g_robot_frame);
+            TryHardTransformPose(g_robot_frame, pose, object_pose);
+            ROS_INFO("  Transform velocity from '%s' to '%s'", vel.header.frame_id.c_str(), g_robot_frame);
+            TryHardTransformVector(g_robot_frame, vel, object_vel);
+            object.claimed = true;
+            claimed_id = object.id;
+            found = true;
+            break;
+        }
+    }
+    if (lock) UnlockWorldState(&g_world_state);
+
+    if (!found) {
+        ROS_INFO("  No reasonable estimates of object velocity");
+        return false; // no object with a reasonable estimate
+    }
+
+    auto unclaim_object = [&]()
+    {
+        if (lock) LockWorldState(&g_world_state);
+        for (auto& object : g_world_state.objects) {
+            if (object.id == claimed_id) {
+                object.claimed = false;
+                break;
+            }
+        }
+        if (lock) UnlockWorldState(&g_world_state);
+    };
+
+    geometry_msgs::PoseStamped grasp_pose_goal_local;
+    double conveyor_speed;
+    double time_to_grasp;
+    if (!ComputeGraspGoal(mach, object_pose, object_vel, &grasp_pose_goal_local, &conveyor_speed, &time_to_grasp)) {
+        unclaim_object();
+        return false;
+    }
 
     if (!SendGoal(mach, grasp_pose_goal_local, conveyor_speed, time_to_grasp, claimed_id)) {
         unclaim_object();
@@ -747,6 +747,160 @@ bool TryPickObject(PickMachine* mach, bool left)
     } else {
         return true;
     }
+}
+
+// 0 = no goals sent, 1 = right arm goal sent, 2 = left arm goal sent, 3 = both arm goals sent
+int TryPickObject(PickMachine* lmach, PickMachine* rmach)
+{
+    LockWorldState(&g_world_state);
+
+    if (g_world_state.objects.empty()) {
+        UnlockWorldState(&g_world_state);
+        return 0;
+    }
+
+    if (g_world_state.objects.size() == 1) {
+        // one object...choose an arm
+        if (TryPickObject(rmach, false)) {
+            UnlockWorldState(&g_world_state);
+            return 1;
+        } else if (TryPickObject(lmach, false)) {
+            UnlockWorldState(&g_world_state);
+            return 2;
+        } else {
+            UnlockWorldState(&g_world_state);
+            return 0;
+        }
+    }
+
+    auto now = ros::Time::now();
+    // 1. Try to send one grasp goal to each arm, prefer to grasp objects
+    // closer to the robot with the left arm (front arm, which could
+    // obstruct the object from reaching the back arm)
+    geometry_msgs::PoseStamped l_goal, r_goal;
+    double lo_speed, ro_speed;
+    double l_time_to_grasp, r_time_to_grasp;
+    bool l_sent = false, r_sent = false;
+
+#if 0
+    for (size_t i = 0; i < g_world_state.objects.size(); ++i) {
+        for (size_t j = i + 1; j < g_world_state.objects.size(); ++j) {
+            auto& o1 = g_world_state.objects[i];
+            auto& o2 = g_world_state.objects[j];
+            if (o1.claimed || o2.claimed) continue;
+            geometry_msgs::Vector3Stamped o1_vel_bar, o2_vel_bar;
+            if (EstimateObjectVelocity(now, &o1, g_robot_frame, 1.0, 2, &o1_vel_bar) &&
+                EstimateObjectVelocity(now, &o2, g_robot_frame, 1.0, 2, &o2_vel_bar))
+            {
+                // TWO OBJECTS IN VIEW
+                ROS_WARN("TWO OBJECTS IN VIEW WTF!");
+
+                geometry_msgs::PoseStamped o1_pose, o2_pose;
+                TryHardTransformPose(g_robot_frame, o1.pose_estimates.back().pose, o1_pose);
+                TryHardTransformPose(g_robot_frame, o2.pose_estimates.back().pose, o2_pose);
+
+                geometry_msgs::Vector3Stamped o1_vel, o2_vel;
+                TryHardTransformVector(g_robot_frame, o1_vel_bar, o1_vel);
+                TryHardTransformVector(g_robot_frame, o2_vel_bar, o2_vel);
+
+                // o1 = left graspable,     o2 = right graspable
+                // o1 = not left graspable, o2 = right graspable
+                // o1 = left graspable,     o2 = not right graspable
+                // o1 = not left graspable, o2 = not right graspable
+                // o2 = left graspable,     o1 = right graspable
+                // o2 = not left graspable, o1 = right graspable
+                // o2 = left graspable,     o1 = not right graspable
+                // o2 = not left graspable, o1 = not right graspable
+
+                if (o1_pose.pose.position.x < o2_pose.pose.position.x) {
+                    // SEND CLOSER TO LEFT AND FURTHER TO RIGHT
+                    if (ComputeGraspGoal(lmach, o1_pose, o1_vel, &l_goal, &lo_speed, &l_time_to_grasp)) {
+                        if (SendGoal(lmach, l_goal, lo_speed, l_time_to_grasp, o1.id)) {
+                            o1.claimed = true;
+                            l_sent = true;
+                        }
+                    }
+
+                    if (ComputeGraspGoal(rmach, o2_pose, o2_vel, &r_goal, &ro_speed, &r_time_to_grasp)) {
+                        if (SendGoal(rmach, r_goal, ro_speed, r_time_to_grasp, o2.id)) {
+                            o2.claimed = true;
+                            r_sent = true;
+                        }
+                    }
+                } else {
+                    // SEND CLOSER (O2) TO LEFT AND FURTHER TO RIGHT (O1)
+                    if (ComputeGraspGoal(lmach, o2_pose, o2_vel, &l_goal, &lo_speed, &l_time_to_grasp)) {
+                        if (SendGoal(lmach, l_goal, lo_speed, l_time_to_grasp, o2.id)) {
+                            o2.claimed = true;
+                            l_sent = true;
+                        }
+                    }
+
+                    if (ComputeGraspGoal(rmach, o1_pose, o1_vel, &r_goal, &ro_speed, &r_time_to_grasp)) {
+                        if (SendGoal(rmach, r_goal, ro_speed, r_time_to_grasp, o1.id)) {
+                            o1.claimed = true;
+                            r_sent = true;
+                        }
+                    }
+                }
+
+                if (l_sent && r_sent) { UnlockWorldState(&g_world_state); return 3; }
+                else if (l_sent) { UnlockWorldState(&g_world_state); return 2; }
+                else if (r_sent) { UnlockWorldState(&g_world_state); return 1; }
+            }
+        }
+    }
+#endif
+
+    for (size_t i = 0; i < g_world_state.objects.size(); ++i) {
+        auto& o = g_world_state.objects[i];
+        if (o.claimed) continue;
+
+        geometry_msgs::Vector3Stamped o_vel_bar;
+        if (!EstimateObjectVelocity(now, &o, g_robot_frame, 1.0, 2, &o_vel_bar)) continue;
+
+        ROS_WARN("ONE OBJECTS IN VIEW!");
+
+        geometry_msgs::PoseStamped o_pose;
+        geometry_msgs::Vector3Stamped o_vel;
+        TryHardTransformPose(g_robot_frame, o.pose_estimates.back().pose, o_pose);
+        TryHardTransformVector(g_robot_frame, o_vel_bar, o_vel);
+
+        if (o_pose.pose.position.x < 0.4) {
+            // prefer to send goal to the left
+            if (ComputeGraspGoal(lmach, o_pose, o_vel, &l_goal, &lo_speed, &l_time_to_grasp) &&
+                SendGoal(lmach, l_goal, lo_speed, l_time_to_grasp, o.id))
+            {
+                o.claimed = true;
+                UnlockWorldState(&g_world_state);
+                return 2;
+            } else if (ComputeGraspGoal(rmach, o_pose, o_vel, &r_goal, &ro_speed, &r_time_to_grasp) &&
+                SendGoal(rmach, r_goal, ro_speed, r_time_to_grasp, o.id))
+            {
+                o.claimed = true;
+                UnlockWorldState(&g_world_state);
+                return 1;
+            }
+        } else {
+            // send goal to the right
+            if (ComputeGraspGoal(rmach, o_pose, o_vel, &r_goal, &ro_speed, &r_time_to_grasp) &&
+                SendGoal(rmach, r_goal, ro_speed, r_time_to_grasp, o.id))
+            {
+                o.claimed = true;
+                UnlockWorldState(&g_world_state);
+                return 1;
+            } else if (ComputeGraspGoal(lmach, o_pose, o_vel, &l_goal, &lo_speed, &l_time_to_grasp) &&
+                SendGoal(lmach, l_goal, lo_speed, l_time_to_grasp, o.id))
+            {
+                o.claimed = true;
+                UnlockWorldState(&g_world_state);
+                return 2;
+            }
+        }
+    }
+
+    UnlockWorldState(&g_world_state);
+    return 0;
 }
 
 PickState DoPlanPickup(PickMachine* mach)
@@ -1128,6 +1282,8 @@ int main(int argc, char* argv[])
     left_machine.move_group->setPlannerId("left_arm[arastar_bfs_manip]");
     left_machine.move_group->setWorkspace(-0.4, -1.2, 0.0, 1.10, 1.2, 2.0);
     left_machine.move_group->startStateMonitor();
+    left_machine.min_workspace_y = 0.05;
+    left_machine.max_workspace_y = 0.4;
     left_machine.home_position = {
 //        86.99, 20.40, 73.15, -110.59, 141.89, -28.94, 0.0
         94.72, 5.16, 160.66, -89.70, 106.84, -110.93, 1.00
@@ -1164,6 +1320,8 @@ int main(int argc, char* argv[])
     right_machine.move_group->setPlannerId("right_arm[arastar_bfs_manip]");
     right_machine.move_group->setWorkspace(-0.4, -1.2, 0.0, 1.10, 1.2, 2.0);
     right_machine.move_group->startStateMonitor();
+    right_machine.min_workspace_y = -0.40;
+    right_machine.max_workspace_y = -0.05;
     right_machine.home_position = {
         //-94.13, 19.62, -68.78, -102.20, 359.0, -114.55, 359.00
         -79.38, 15.53, -68.79, -95.13, 359.0, -66.94, 79.95
@@ -1193,6 +1351,7 @@ int main(int argc, char* argv[])
     ResetArms(&left_machine, &right_machine);
 
     ros::Rate loop_rate(30.0);
+    auto prev_picks = -1;
     auto picks = 0;
     while (ros::ok()) {
         // update objects
@@ -1203,10 +1362,47 @@ int main(int argc, char* argv[])
         PickMachine* idle_machine = NULL;
         PickMachine* other_machine = NULL;
 
-        ROS_WARN("picks = %d", picks);
+        if (picks != prev_picks) {
+            prev_picks = picks;
+            ROS_WARN("picks = %d", picks);
+        }
+
+        if (right_machine.curr_state == PickState::WaitForGoal &&
+            left_machine.curr_state == PickState::WaitForGoal)
+        {
+            auto res = TryPickObject(&left_machine, &right_machine);
+            switch (res) {
+            case 0:
+                break;
+            case 1:
+            case 2:
+                picks += 1;
+                break;
+            case 3:
+                picks += 2;
+                break;
+            }
+        } else {
 #define FORCE_ALTERNATE 1
 #if FORCE_ALTERNATE
-        if ((picks & 1) == 0) {
+            if ((picks & 1) == 0) {
+                if (right_machine.curr_state == PickState::WaitForGoal) {
+                    idle_machine = &right_machine;
+                    other_machine = &left_machine;
+                } else if (left_machine.curr_state == PickState::WaitForGoal) {
+                    idle_machine = &left_machine;
+                    other_machine = &right_machine;
+                }
+            } else {
+                if (left_machine.curr_state == PickState::WaitForGoal) {
+                    idle_machine = &left_machine;
+                    other_machine = &right_machine;
+                } else if (right_machine.curr_state == PickState::WaitForGoal) {
+                    idle_machine = &right_machine;
+                    other_machine = &left_machine;
+                }
+            }
+#else
             if (right_machine.curr_state == PickState::WaitForGoal) {
                 idle_machine = &right_machine;
                 other_machine = &left_machine;
@@ -1214,41 +1410,26 @@ int main(int argc, char* argv[])
                 idle_machine = &left_machine;
                 other_machine = &right_machine;
             }
-        } else {
-            if (left_machine.curr_state == PickState::WaitForGoal) {
-                idle_machine = &left_machine;
-                other_machine = &right_machine;
-            } else if (right_machine.curr_state == PickState::WaitForGoal) {
-                idle_machine = &right_machine;
-                other_machine = &left_machine;
-            }
-        }
-#else
-        if (right_machine.curr_state == PickState::WaitForGoal) {
-            idle_machine = &right_machine;
-            other_machine = &left_machine;
-        } else if (left_machine.curr_state == PickState::WaitForGoal) {
-            idle_machine = &left_machine;
-            other_machine = &right_machine;
-        }
 #endif
-
-        if (idle_machine != NULL &&
-            (
-                other_machine->curr_state != PickState::PlanPickup
+    
+            if (idle_machine != NULL &&
+                (
+                    other_machine->curr_state != PickState::PlanPickup
 #if 0
-                ||
-                other_machine->curr_state == PickState::WaitForGoal ||
-                other_machine->curr_state == PickState::ExecuteDropoff ||
-                other_machine->curr_state == PickState::OpenGripper
+                    ||
+                    other_machine->curr_state == PickState::WaitForGoal ||
+                    other_machine->curr_state == PickState::ExecuteDropoff ||
+                    other_machine->curr_state == PickState::OpenGripper
 #endif
-            ))
-        {
-            // select a target object
-            if (TryPickObject(idle_machine, idle_machine == &left_machine)) {
-                ++picks;
+                ))
+            {
+                // select a target object
+                if (TryPickObject(idle_machine)) {
+                    ++picks;
+                }
             }
         }
+
 
         loop_rate.sleep();
     }
