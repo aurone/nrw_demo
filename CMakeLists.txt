@@ -26,7 +26,7 @@ set(CMAKE_CXX_FLAGS "-std=c++11")
 include_directories(${catkin_INCLUDE_DIRS})
 include_directories(${EIGEN3_INCLUDE_DIR})
 
-add_executable(demo_executive src/demo_executive.2.cpp)
+add_executable(demo_executive src/demo_executive.cpp)
 target_link_libraries(
     demo_executive
     ${tf_LIBRARIES}
