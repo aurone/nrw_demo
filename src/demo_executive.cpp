@@ -32,6 +32,8 @@ using FollowJointTrajectoryActionClient = actionlib::SimpleActionClient<
 using GripperCommandActionClient = actionlib::SimpleActionClient<
         pr2_controllers_msgs::Pr2GripperCommandAction>;
 
+double ADJUST = 0.02;
+
 // PrepareGripper -> WaitForGoal
 // WaitForGoal -> Finished
 // WaitForGoal -> ExecutePickup
@@ -59,6 +61,7 @@ enum struct PickState
     PlanDropoff,
     ExecuteDropoff,
     OpenGripper,
+    MoveToHome,
     Count
 };
 
@@ -101,6 +104,7 @@ struct PickMachine
     double time_to_grasp;
     uint32_t claimed_id = std::numeric_limits<uint32_t>::max();
 
+    std::vector<double> dropoff_position;
     std::vector<double> home_position;
 
     MoveGroup::Plan pickup_plan;
@@ -469,6 +473,7 @@ auto to_cstring(PickState state) -> const char*
     case PickState::PlanDropoff:        return "PlanDropoff";
     case PickState::ExecuteDropoff:     return "ExecuteDropoff";
     case PickState::OpenGripper:        return "OpenGripper";
+    case PickState::MoveToHome:         return "MoveToHome";
     default:                            return "<Unknown>";
     }
 };
@@ -657,7 +662,7 @@ bool ComputeGraspGoal(
     grasp_pose_goal->pose.position.y = object_pose.pose.position.y + grasp_offset;
 
     // hardcoded :)
-    grasp_pose_goal->pose.position.z = 0.73; //+= 0.05;
+    grasp_pose_goal->pose.position.z = 0.73 + ADJUST - 0.01; //+= 0.05;
     grasp_pose_goal->pose.orientation.x = grasp_pose_goal->pose.orientation.y = 0.0;
     grasp_pose_goal->pose.orientation.z = grasp_pose_goal->pose.orientation.w = 0.5 * sqrt(2.0);
 
@@ -866,7 +871,8 @@ int TryPickObject(PickMachine* lmach, PickMachine* rmach)
         TryHardTransformPose(g_robot_frame, o.pose_estimates.back().pose, o_pose);
         TryHardTransformVector(g_robot_frame, o_vel_bar, o_vel);
 
-        if (o_pose.pose.position.x < 0.4) {
+        auto center = 0.43; //0.4;
+        if (o_pose.pose.position.x < center) {
             // prefer to send goal to the left
             if (ComputeGraspGoal(lmach, o_pose, o_vel, &l_goal, &lo_speed, &l_time_to_grasp) &&
                 SendGoal(lmach, l_goal, lo_speed, l_time_to_grasp, o.id))
@@ -1074,7 +1080,7 @@ PickState DoPlanDropoff(PickMachine* mach)
     WaitForMoveGroup();
     g_move_group_busy = true;
 
-    auto v = mach->home_position;
+    auto v = mach->dropoff_position;
     for (auto& value : v) {
         value *= M_PI / 180.0;
     }
@@ -1095,18 +1101,6 @@ PickState DoPlanDropoff(PickMachine* mach)
 
 PickState DoExecuteDropoff(PickMachine* mach)
 {
-//    auto v = mach->home_position;
-//    for (auto& value : v) {
-//        value *= M_PI / 180.0;
-//    }
-//
-//    mach->move_group->setJointValueTarget(v);
-//
-//    auto err = mach->move_group->move();
-//    if (err.val != moveit_msgs::MoveItErrorCodes::SUCCESS) {
-//        ROS_ERROR("Failed to move arm to grasp pose");
-//    }
-
     control_msgs::FollowJointTrajectoryGoal goal;
     goal.trajectory = mach->dropoff_plan.trajectory_.joint_trajectory;
     auto state = mach->follow_joint_trajectory_client->sendGoalAndWait(goal);
@@ -1120,6 +1114,38 @@ PickState DoExecuteDropoff(PickMachine* mach)
 PickState DoOpenGripper(PickMachine* mach)
 {
     OpenGripper(mach->gripper_command_client.get());
+    return PickState::MoveToHome;
+}
+
+PickState DoMoveToHome(PickMachine* mach)
+{
+    WaitForMoveGroup();
+    g_move_group_busy = true;
+
+    auto v = mach->home_position;
+    for (auto& value : v) {
+        value *= M_PI / 180.0;
+    }
+
+    mach->move_group->setJointValueTarget(v);
+
+    MoveGroup::Plan home_plan;
+    auto err = mach->move_group->plan(home_plan);
+    if (err != moveit_msgs::MoveItErrorCodes::SUCCESS) {
+        // You got us in here, did you have a plan for getting out?
+        // we should literally execute the pickup plan in reverse ...probably...
+        ROS_ERROR("PRETTY BAD! GOING NOWHERE!");
+    }
+
+    g_move_group_busy = false;
+
+    control_msgs::FollowJointTrajectoryGoal goal;
+    goal.trajectory = home_plan.trajectory_.joint_trajectory;
+    auto state = mach->follow_joint_trajectory_client->sendGoalAndWait(goal);
+    if (state != actionlib::SimpleClientGoalState::SUCCEEDED) {
+        ROS_ERROR("ALSO PRETTY BAD!");
+    }
+
     return PickState::WaitForGoal;
 }
 
@@ -1127,7 +1153,7 @@ auto MakeConveyorCollisionObject() -> moveit_msgs::CollisionObject
 {
     moveit_msgs::CollisionObject conveyor;
 
-    double height = 0.64;
+    double height = 0.64 + ADJUST;
 
     geometry_msgs::PoseStamped p;
     p.header.frame_id = g_robot_frame;
@@ -1269,6 +1295,7 @@ int main(int argc, char* argv[])
     states[(int)PickState::PlanDropoff].pump = DoPlanDropoff;
     states[(int)PickState::ExecuteDropoff].pump = DoExecuteDropoff;
     states[(int)PickState::OpenGripper].pump = DoOpenGripper;
+    states[(int)PickState::MoveToHome].pump = DoMoveToHome;
 
     ROS_INFO("Initialize left picking machine");
     PickMachine left_machine;
@@ -1285,6 +1312,10 @@ int main(int argc, char* argv[])
     left_machine.min_workspace_y = 0.05;
     left_machine.max_workspace_y = 0.4;
     left_machine.home_position = {
+//        64.72, 5.16, 160.66, -89.70, 106.84, -110.93, 1.00
+        49.38, 6.75, 167.66, -104.50, 137.01, -114.57, 0.0
+    };
+    left_machine.dropoff_position = {
 //        86.99, 20.40, 73.15, -110.59, 141.89, -28.94, 0.0
         94.72, 5.16, 160.66, -89.70, 106.84, -110.93, 1.00
     };
@@ -1323,6 +1354,10 @@ int main(int argc, char* argv[])
     right_machine.min_workspace_y = -0.40;
     right_machine.max_workspace_y = -0.05;
     right_machine.home_position = {
+        //-94.13, 19.62, -68.78, -102.20, 359.0, -114.55, 359.00
+        -79.38, 15.53, -68.79, -95.13, 359.0, -66.94, 79.95
+    };
+    right_machine.dropoff_position = {
         //-94.13, 19.62, -68.78, -102.20, 359.0, -114.55, 359.00
         -79.38, 15.53, -68.79, -95.13, 359.0, -66.94, 79.95
     };
