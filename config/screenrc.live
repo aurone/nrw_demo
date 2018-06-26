@@ -16,13 +16,22 @@ screen -t plan
 stuff "roslaunch pr2_sbpl_interface_config move_group.launch"
 
 screen -t demo
-stuff "rosrun nrw_demo demo_executive"
+stuff "roslaunch nrw_demo demo_executive.launch --screen"
 
 screen -t track
 stuff "rosrun object_track tracker input:=/head_mount_kinect/depth_registered/points"
 
 # (robot)
+rosrun pr2_dashboard pr2_dashboard
+
+# (robot)
 #roslaunch rgbd_assembler openni_new_node.launch
+
+# (robot)
+#roslaunch pr2_teleop teleop_joystick.launch
+
+# (robot)
+#rosrun topic_tools throttle messages /head_mount_kinect/depth_registered/points 1 /head_mount_kinect/depth_registered/points_throttle
 
 # (robot) point head at marker
 #rosrun simple_head point_head
